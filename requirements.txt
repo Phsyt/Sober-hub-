@@ -1,0 +1,11 @@
+# Sober Hub itself needs only Python 3.8+ and the standard library - there is nothing to install to run it.
+#
+# Optional: pywebview gives you a native app window instead of a browser app window.
+# On Linux it also needs a GUI backend. Pick one:
+#   Debian/Ubuntu:  sudo apt install python3-gi gir1.2-webkit2-4.1
+#   or Qt:          pip install "pywebview[qt]"
+# If no backend is available, Sober Hub falls back to the browser window automatically.
+pywebview>=5.0
+
+# Not a pip package, but required at runtime: Sober itself
+#   flatpak install flathub org.vinegarhq.Sober
