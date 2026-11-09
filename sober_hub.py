@@ -27,11 +27,16 @@ Login
     - Quick Login: the hub shows a code, you confirm it on roblox.com while logged in there (the same flow Roblox uses to sign in on a TV).
     - Cookie: paste a .ROBLOSECURITY cookie.
 """
-import base64, json, math, os, re, shlex, sys, shutil, subprocess, threading, time, urllib.parse, urllib.request, urllib.error, uuid, webbrowser
+import ast, base64, json, math, os, re, shlex, sys, shutil, subprocess, threading, time, urllib.parse, urllib.request, urllib.error, uuid, webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 VERSION = "5.1.1"   # bump this and push the file to GitHub to roll out an update
+WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release
+    "Auto-update from GitHub, with a clear message if an update can't be installed",
+    "New Quick Login: sign in with a code, no cookie needed (cookie login still works)",
+    "Hub Settings has a new Updates card with a manual check and an on/off switch",
+]
 REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
 ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
 D = os.path.expanduser("~/.config/sober-hub"); F = D + "/data.json"
@@ -472,9 +477,19 @@ def ql_poll(_):
 def ql_cancel(_): QL.clear(); return {"ok": True}
 
 # ---- auto update from GitHub
-UPD = {"state": "idle", "version": None, "error": None, "shown": True}   # idle | checking | current | found | installed | failed | offline | nover
+UPD = {"state": "idle", "version": None, "error": None, "notes": [], "shown": True}   # idle | checking | current | found | installed | failed | offline | nover
 ULOCK = threading.Lock()
 def _vt(v): return tuple(int(x) for x in re.findall(r"\d+", v))
+
+def _notes(text):
+    """Read the WHATS_NEW list out of the downloaded file without running it (ast.literal_eval only accepts plain literals)."""
+    try:
+        for n in ast.parse(text).body:
+            if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "WHATS_NEW" for t in n.targets):
+                v = ast.literal_eval(n.value)
+                return [str(x)[:200] for x in v if isinstance(x, str)][:12] if isinstance(v, (list, tuple)) else []
+    except Exception: pass
+    return []
 
 def _install_update(raw, text, rv):
     """Verify a downloaded sober_hub.py and atomically replace this file with it (old one kept as .bak). Raises with a readable reason."""
@@ -512,8 +527,9 @@ def update_check(startup=False):
         try: _install_update(raw, text, rv)
         except Exception as e:
             UPD.update(state="failed", error=str(e) or e.__class__.__name__, shown=False); return dict(UPD)
-        UPD.update(state="installed", shown=False)
-        with lock: d = load(); d["upd_notice"] = {"version": rv, "old": VERSION}; store(d)
+        notes = _notes(text)
+        UPD.update(state="installed", notes=notes, shown=False)
+        with lock: d = load(); d["upd_notice"] = {"version": rv, "old": VERSION, "notes": notes}; store(d)
         return dict(UPD)
 
 def restart(keep_port=False):
@@ -525,8 +541,9 @@ def restart(keep_port=False):
 PORT = [0]
 
 def upd_status(_):
-    d = load()
-    return {**{k: v for k, v in UPD.items()}, "cur": VERSION, "notice": d.get("upd_notice")}
+    n = load().get("upd_notice")
+    if n and not n.get("notes") and n.get("version") == VERSION: n["notes"] = WHATS_NEW   # an older build wrote the notice, but this running file knows its own notes
+    return {**{k: v for k, v in UPD.items()}, "cur": VERSION, "notice": n}
 def upd_check(_): return {**update_check(), "cur": VERSION}
 def upd_ack(_):
     UPD["shown"] = True
@@ -952,7 +969,7 @@ textarea{width:100%;font-family:monospace}.row{display:flex;gap:8px;flex-wrap:wr
 table{width:100%;border-collapse:collapse}td{padding:7px;border-bottom:1px solid #ffffff10}
 #dlg{position:fixed;inset:0;background:#000b;z-index:60;display:flex;align-items:center;justify-content:center;animation:dlgin .12s ease-out}
 #dlg .box{background:var(--panel);border:1px solid #ffffff1a;border-radius:12px;padding:22px 24px 16px;width:min(420px,92vw);box-shadow:0 20px 60px #000a}
-#dlg h3{margin:0 0 8px;font-size:17px}#dlg p{margin:0 0 14px;color:var(--muted);white-space:pre-line;line-height:1.45}
+#dlg h3{margin:0 0 8px;font-size:17px}#dlg p{margin:0 0 14px;color:var(--muted);white-space:pre-line;line-height:1.45;max-height:55vh;overflow:auto}
 #dlg input{width:100%;margin-bottom:14px}#dlg .acts{display:flex;justify-content:flex-end;gap:6px}#dlg .btn{margin:0}
 .btn.danger{background:#e5484d}@keyframes dlgin{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
 #toast{position:fixed;bottom:20px;right:20px;background:var(--accent);padding:10px 18px;border-radius:var(--radius);display:none;z-index:99;max-width:380px}
@@ -1187,13 +1204,14 @@ async function qlCancel(){qlStop();await api('ql_cancel',{});if($('#qlbox'))$('#
 async function connect(){const r=await api('connect',{cookie:$('#ck').value});r.error?toast(r.error):(toast('Connected!'),go('home'))}
 // ---- auto update popups
 async function updRestart(){await api('upd_restart',{});toast('Restarting Sober Hub…',20000);setTimeout(()=>{const t=setInterval(async()=>{try{const r=await fetch('/api/upd_status');if(r.ok){clearInterval(t);location.reload()}}catch(e){}},700)},1800)}
+const nt=a=>a&&a.length?'\n\nWhat\'s new:\n'+a.map(x=>'• '+x).join('\n'):'';
 async function updShow(u,manual){
- if(u.state=='installed'){await api('upd_ack',{});const y=await ask('Version '+u.version+' is installed. Restart Sober Hub to start using it.',{title:'sober_hub updated automatically!',ok:'Restart now',danger:0});if(y)updRestart()}
+ if(u.state=='installed'){await api('upd_ack',{});const y=await ask('Version '+u.version+' is installed. Restart Sober Hub to start using it.'+nt(u.notes),{title:'Sober Hub updated automatically!',ok:'Restart now',danger:0});if(y)updRestart()}
  else if(u.state=='failed'){await api('upd_ack',{});await ask('Version '+u.version+' is available on GitHub, but it could not be installed: '+u.error+'.\n\nYou are still on version '+u.cur+' and your current file was not changed.',{title:'Update found but failed to install',ok:'OK',info:1})}
  else if(manual){u.state=='current'?toast('You are on the latest version (v'+u.cur+')',4000):toast(u.error||'Could not check for updates',6000)}}
 async function updNow(b){b.disabled=true;toast('Checking GitHub…',15000);const u=await api('upd_check',{});b.disabled=false;$('#toast').style.display='none';updShow(u,true)}
 async function updPoll(){const u=await api('upd_status',{});if(u.error&&!u.state)return;
- if(u.notice){await api('upd_ack',{});await ask('Version '+u.notice.version+' is now installed (you were on '+u.notice.old+').',{title:'sober_hub updated automatically!',ok:'Nice',info:1})}
+ if(u.notice){await api('upd_ack',{});await ask('Version '+u.notice.version+' is now installed (you were on '+u.notice.old+').'+nt(u.notice.notes),{title:'Sober Hub updated automatically!',ok:'Nice',info:1})}
  else if((u.state=='installed'||u.state=='failed')&&!u.shown)updShow(u)}
 async function signin(){const r=await api('user',{name:$('#un').value});r.error?toast(r.error):load()}
 function rnd(){const g=S.favs[Math.random()*S.favs.length|0];play(g.place,g.name,g.icon)}
@@ -1666,7 +1684,7 @@ if __name__ == "__main__":
     want = int(os.environ.pop("SOBER_HUB_PORT", "0") or 0)   # set only when the hub restarts itself after an update
     if not want and "--no-update" not in sys.argv and load()["opts"].get("autoupd", "1") != "0":
         if update_check(startup=True)["state"] == "installed":
-            try: restart()   # the new process shows "sober_hub updated automatically!"
+            try: restart()   # the new process shows "Sober Hub updated automatically!"
             except Exception: pass
     try: srv = ThreadingHTTPServer(("127.0.0.1", want), H)
     except OSError: srv = ThreadingHTTPServer(("127.0.0.1", 0), H); want = 0
