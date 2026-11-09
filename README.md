@@ -3,6 +3,9 @@
 > - Run it only on your own computer. **Never host it on a cloud server or expose it to a network.**
 > - **I am not responsible for any bans, lost items, lost Robux or anything else caused by this software.**
 > - Sober Hub is an unofficial community project. It is not affiliated with or endorsed by Roblox or the Sober / VinegarHQ team.
+
+
+(this is a screenshot of the launcher with the sunset theme from theme presets)
 ![Sober Hub Image](https://raw.githubusercontent.com/Phsyt/Sober-hub-/refs/heads/main/image.png
 )
 
