@@ -6,6 +6,7 @@ A single file: a standard-library Python backend plus an embedded HTML/CSS/JS fr
     python3 sober_hub.py              native window if pywebview is installed, else a browser app window
     python3 sober_hub.py --browser    always use the browser window
     python3 sober_hub.py --install    add a desktop shortcut
+    python3 sober_hub.py --no-update  skip the GitHub update check for this run
 
 Layout
     Python    helpers for Roblox/Sober/data storage, then the R dict: every entry is a JSON route served at /api/<name>
@@ -16,16 +17,28 @@ Data and security model
     - The server binds to 127.0.0.1 only and rejects requests whose Host/Origin is not local.
     - The .ROBLOSECURITY cookie is stored locally, attached only to *.roblox.com, and never exported or sent to the UI.
     - Third-party endpoints (Rolimons, a user-supplied recommendations API) never receive the cookie.
+
+Auto update
+    - On start (and every 6 hours) the hub reads VERSION from sober_hub.py in the GitHub repo. If the repo's version is higher, the file is
+      downloaded, syntax-checked, and written over this one (the old file is kept as sober_hub.py.bak). To publish an update, bump VERSION below
+      and push the file. The cookie is never sent to GitHub.
+
+Login
+    - Quick Login: the hub shows a code, you confirm it on roblox.com while logged in there (the same flow Roblox uses to sign in on a TV).
+    - Cookie: paste a .ROBLOSECURITY cookie.
 """
-import base64, json, math, os, shlex, sys, shutil, subprocess, threading, time, urllib.parse, urllib.request, urllib.error, uuid, webbrowser
+import base64, json, math, os, re, shlex, sys, shutil, subprocess, threading, time, urllib.parse, urllib.request, urllib.error, uuid, webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
+VERSION = "5.1.0"   # bump this and push the file to GitHub to roll out an update
+REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
+ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
 D = os.path.expanduser("~/.config/sober-hub"); F = D + "/data.json"
 SC = os.path.expanduser("~/.var/app/org.vinegarhq.Sober/config/sober/config.json")
 APP = "org.vinegarhq.Sober"
-DEF = {"user": None, "favs": [], "history": [], "play": {}, "notes": {}, "css": "", "daily": {}, "pinned": [], "collections": {}, "hidden_games": [], "hidden_chat": {}, "privs": [], "capi": {"url": "", "method": "GET", "headers": "", "body": "", "path": ""},
-       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "breakmin": 0},
+DEF = {"user": None, "favs": [], "history": [], "play": {}, "notes": {}, "css": "", "daily": {}, "pinned": [], "collections": {}, "hidden_games": [], "hidden_chat": {}, "privs": [], "upd_notice": None, "capi": {"url": "", "method": "GET", "headers": "", "body": "", "path": ""},
+       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "breakmin": 0, "autoupd": "1"},
        "theme": {"bg": "#18191d", "panel": "#232527", "accent": "#335fff", "green": "#00b06f", "text": "#f7f7f8", "radius": "8", "font": "system-ui", "tile": "150", "compact": "0"}}
 lock = threading.Lock()
 ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 6 222 222"><path fill="#FDD758" fill-rule="evenodd" d="M57.0 16.0 L218.0 58.0 L172.0 219.0 L15.0 177.0ZM106.4 99.9 L135.1 107.4 L127.6 136.1 L98.9 128.6Z"/></svg>"""
@@ -401,15 +414,132 @@ def user(a):
     if not r: raise Exception("User not found")
     return fill_user(r[0]["id"], r[0]["name"], r[0]["displayName"])
 
-def connect(a):
-    """Log in with a pasted .ROBLOSECURITY cookie. It is validated against Roblox first and discarded again if rejected."""
-    ck = a["cookie"].strip().replace(".ROBLOSECURITY=", "")
+def _finish_login(ck):
+    """Store a session cookie, validate it against Roblox and discard it again if rejected. Shared by cookie and Quick Login."""
     with lock: d = load(); d["cookie"] = ck; store(d)
     try: me = req("https://users.roblox.com/v1/users/authenticated")
     except Exception:
         with lock: d = load(); d.pop("cookie", None); store(d)
-        raise Exception("Roblox rejected that cookie")
+        raise Exception("Roblox rejected that login")
     return fill_user(me["id"], me["name"], me["displayName"])
+
+def connect(a):
+    """Log in with a pasted .ROBLOSECURITY cookie."""
+    ck = a["cookie"].strip().replace(".ROBLOSECURITY=", "")
+    if not ck: raise Exception("Paste your .ROBLOSECURITY cookie first")
+    return _finish_login(ck)
+
+def _rpost(url, body):
+    """POST JSON to Roblox WITHOUT any stored cookie (used before we are logged in). Returns (json, response headers)."""
+    def go(tok=None):
+        h = {"User-Agent": "SoberHub", "Content-Type": "application/json"}
+        if tok: h["x-csrf-token"] = tok
+        r = OP.open(urllib.request.Request(url, headers=h, method="POST", data=json.dumps(body).encode()), timeout=15)
+        t = r.read(); return (json.loads(t) if t else {}), r.headers
+    try:
+        try: return go()
+        except urllib.error.HTTPError as e:
+            if e.code == 403 and e.headers.get("x-csrf-token"): return go(e.headers["x-csrf-token"])
+            raise
+    except urllib.error.HTTPError as e:
+        try: m = json.loads(e.read())["errors"][0]["message"]
+        except Exception: m = f"Roblox returned HTTP {e.code}"
+        raise Exception(m)
+
+QL = {}   # the one Quick Login in progress: {"code", "key", "t0"}; the key never leaves this process
+QLA = "https://apis.roblox.com/auth-token-service/v1/login/"
+def ql_start(_):
+    """Quick Login step 1: ask Roblox for a one-time code. The person confirms it on roblox.com/crossdevicelogin/ConfirmCode."""
+    r, _h = _rpost(QLA + "create", {})
+    if not r.get("code") or not r.get("privateKey"): raise Exception("Roblox didn't give a login code")
+    QL.clear(); QL.update(code=r["code"], key=r["privateKey"], t0=time.time())
+    return {"code": r["code"], "ttl": 300}
+
+def ql_poll(_):
+    """Quick Login step 2 (polled by the UI): waiting -> linked -> done. On confirmation the session cookie is taken from Roblox's reply and stored."""
+    if not QL: return {"state": "none"}
+    if time.time() - QL["t0"] > 320: QL.clear(); return {"state": "expired"}
+    s, _h = _rpost(QLA + "status", {"code": QL["code"], "privateKey": QL["key"]})
+    st = s.get("status")
+    if st == "Cancelled": QL.clear(); return {"state": "cancelled"}
+    if st != "Validated": return {"state": "linked" if st == "UserLinked" else "waiting"}
+    code, key = QL["code"], QL["key"]; QL.clear()
+    _b, h = _rpost("https://auth.roblox.com/v2/login", {"ctype": "AuthToken", "cvalue": code, "password": key})
+    ck = next((c.split(";")[0].split("=", 1)[1] for c in (h.get_all("Set-Cookie") or []) if c.startswith(".ROBLOSECURITY=")), None)
+    if not ck: raise Exception("Roblox confirmed the code but didn't return a session")
+    return {"state": "done", "user": _finish_login(ck)}
+
+def ql_cancel(_): QL.clear(); return {"ok": True}
+
+# ---- auto update from GitHub
+UPD = {"state": "idle", "version": None, "error": None, "shown": True}   # idle | checking | current | found | installed | failed | offline | nover
+ULOCK = threading.Lock()
+def _vt(v): return tuple(int(x) for x in re.findall(r"\d+", v))
+
+def _install_update(raw, text, rv):
+    """Verify a downloaded sober_hub.py and atomically replace this file with it (old one kept as .bak). Raises with a readable reason."""
+    me = os.path.abspath(__file__)
+    if len(raw) < 20000 or "ThreadingHTTPServer" not in text or "__main__" not in text: raise Exception("the downloaded file looks incomplete")
+    try: compile(text, "sober_hub.py", "exec")
+    except SyntaxError as e: raise Exception(f"the downloaded file has a syntax error (line {e.lineno})")
+    if not os.access(os.path.dirname(me), os.W_OK) or not os.access(me, os.W_OK): raise Exception("no permission to write to " + me)
+    tmp = me + ".new"
+    try:
+        with open(tmp, "wb") as f: f.write(raw)
+        try: shutil.copymode(me, tmp)
+        except Exception: pass
+        shutil.copy2(me, me + ".bak")
+        os.replace(tmp, me)
+    except OSError as e:
+        try: os.remove(tmp)
+        except Exception: pass
+        raise Exception(e.strerror or str(e))
+
+def update_check(startup=False):
+    """Compare VERSION with the one on GitHub; if the repo is newer, download and install it. The result is kept in UPD for the UI."""
+    with ULOCK:
+        UPD.update(state="checking", error=None)
+        try:
+            r = urllib.request.Request(REPO_RAW + "?t=" + str(int(time.time())), headers={"User-Agent": "SoberHub-updater", "Cache-Control": "no-cache"})
+            raw = urllib.request.urlopen(r, timeout=6 if startup else 15).read(); text = raw.decode("utf-8")
+        except Exception as e:
+            UPD.update(state="offline", error="Couldn't reach GitHub: " + str(getattr(e, "reason", e))); return dict(UPD)
+        m = re.search(r'^VERSION\s*=\s*["\']([0-9][\w.\-]*)["\']', text, re.M)
+        if not m: UPD.update(state="nover", error="The file on GitHub has no VERSION line"); return dict(UPD)
+        rv = m.group(1)
+        if _vt(rv) <= _vt(VERSION): UPD.update(state="current", version=rv); return dict(UPD)
+        UPD.update(state="found", version=rv)
+        try: _install_update(raw, text, rv)
+        except Exception as e:
+            UPD.update(state="failed", error=str(e) or e.__class__.__name__, shown=False); return dict(UPD)
+        UPD.update(state="installed", shown=False)
+        with lock: d = load(); d["upd_notice"] = {"version": rv, "old": VERSION}; store(d)
+        return dict(UPD)
+
+def restart(keep_port=False):
+    """Replace this process with the freshly installed file. keep_port reuses the port so an open browser window can just reload."""
+    env = dict(os.environ)
+    if keep_port: env["SOBER_HUB_PORT"] = str(PORT[0])
+    sys.stdout.flush()
+    os.execve(sys.executable, [sys.executable, os.path.abspath(__file__)] + ARGV[1:], env)
+PORT = [0]
+
+def upd_status(_):
+    d = load()
+    return {**{k: v for k, v in UPD.items()}, "cur": VERSION, "notice": d.get("upd_notice")}
+def upd_check(_): return {**update_check(), "cur": VERSION}
+def upd_ack(_):
+    UPD["shown"] = True
+    with lock: d = load(); d["upd_notice"] = None; store(d)
+    return {"ok": True}
+def upd_restart(_):
+    threading.Timer(0.6, lambda: restart(True)).start(); return {"ok": True}
+def _upd_loop():
+    while True:
+        time.sleep(6 * 3600)
+        try:
+            if load()["opts"].get("autoupd", "1") != "0": update_check()
+        except Exception: pass
 
 def disconnect(a):
     """Forget the stored cookie and user."""
@@ -653,14 +783,14 @@ def clear(a):
 
 def imp(a):
     """Restore a backup. The cookie is never imported and the current custom-API headers (which may hold a key) are kept."""
-    a["data"].pop("cookie", None)
+    for k in ("cookie", "upd_notice", "version", "connected"): a["data"].pop(k, None)
     if isinstance(a["data"].get("capi"), dict): a["data"]["capi"]["headers"] = (load().get("capi") or {}).get("headers", "")
     with lock: store({**load(), **a["data"]})
     return {"ok": True}
 
 def state(_):
     """Everything the UI needs, minus the cookie itself (only a `connected` flag is exposed)."""
-    d = load(); c = bool(d.pop("cookie", None)); d["connected"] = c; return d
+    d = load(); c = bool(d.pop("cookie", None)); d["connected"] = c; d["version"] = VERSION; return d
 
 def rbx(a):
     """Generic proxy to Roblox APIs for the UI. Only https://*.roblox.com is allowed."""
@@ -751,7 +881,8 @@ def mods_dir(_a):
     subprocess.Popen(["xdg-open", OVL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); return {"ok": True}
 
 R = {"state": state, "lastplayed": lastplayed, "open": open_url, "rbx": rbx, "me": me, "game": lambda a: ginfo(a["place"]), "search": search, "servers": servers,
-     "user": user, "connect": connect, "disconnect": disconnect, "friends": friends, "frequests": frequests, "discover": discover, "capi_test": capi_test, "launch": launch,
+     "user": user, "connect": connect, "ql_start": ql_start, "ql_poll": ql_poll, "ql_cancel": ql_cancel,
+     "upd_status": upd_status, "upd_check": upd_check, "upd_ack": upd_ack, "upd_restart": upd_restart, "disconnect": disconnect, "friends": friends, "frequests": frequests, "discover": discover, "capi_test": capi_test, "launch": launch,
      "active": active, "heal": lambda a: heal(a["places"]), "hist_del": hist_del, "sober": sober, "sober_set": sober_set, "sober_update": sober_update,
      "sober_kill": sober_kill, "sober_dir": sober_dir, "save": save, "clear": clear, "import": imp,
      "mods_list": mods_list, "mods_put": mods_put, "mods_del": mods_del, "mods_dir": mods_dir}
@@ -852,13 +983,13 @@ const pv=v=>{try{return JSON.parse(v)}catch(e){return v}};
 function dlg(o){return new Promise(res=>{
  if(dlg.cur)dlg.cur(o.input?null:false);
  const m=document.createElement('div');m.id='dlg';
- m.innerHTML=`<div class=box><h3>${esc(o.title||(o.input?'Sober Hub':'Are you sure?'))}</h3><p>${esc(o.msg)}</p>${o.input?'<input id=dlgi autocomplete=off>':''}<div class=acts><button class="btn alt" id=dlgn>Cancel</button><button class="btn${o.danger?' danger':''}" id=dlgy>${esc(o.ok||'OK')}</button></div></div>`;
+ m.innerHTML=`<div class=box><h3>${esc(o.title||(o.input?'Sober Hub':'Are you sure?'))}</h3><p>${esc(o.msg)}</p>${o.input?'<input id=dlgi autocomplete=off>':''}<div class=acts>${o.info?'':'<button class="btn alt" id=dlgn>Cancel</button>'}<button class="btn${o.danger?' danger':''}" id=dlgy>${esc(o.ok||'OK')}</button></div></div>`;
  const done=v=>{document.removeEventListener('keydown',kd,true);dlg.cur=null;m.remove();res(v)};
  const yes=()=>done(o.input?$('#dlgi').value:true),no=()=>done(o.input?null:false);
  const kd=e=>{if(e.key=='Escape'){e.preventDefault();e.stopPropagation();no()}else if(e.key=='Enter'&&document.activeElement.id!='dlgn'){e.preventDefault();e.stopPropagation();yes()}};
  document.addEventListener('keydown',kd,true);dlg.cur=done;
  m.onclick=e=>{if(e.target==m)no()};document.body.appendChild(m);
- $('#dlgy').onclick=yes;$('#dlgn').onclick=no;
+ $('#dlgy').onclick=yes;$('#dlgn')&&($('#dlgn').onclick=no);
  if(o.input){const i=$('#dlgi');i.value=o.def??'';i.focus();i.select()}else $('#dlgy').focus()})}
 const ask=(msg,o)=>dlg({msg,...o});
 const askText=(msg,def,o)=>dlg({msg,input:1,def,ok:'Create',...o});
@@ -980,6 +1111,7 @@ hub(){const o=S.opts;return `<h2>Hub settings</h2>
  <div class=card><b>Home hero (top game)</b><small>Which game is shown at the top of Home.</small><select onchange="save({opts:{hero:this.value}})"><option value=hub ${o.hero!='roblox'?'selected':''}>Last game I launched from Sober Hub</option><option value=roblox ${o.hero=='roblox'?'selected':''}>First game in my Roblox Continue list</option></select></div>
  <div class=card><b>Friend notifications</b><small>Desktop notification when friends start playing (checked every minute while the hub is open).</small><select onchange="setNotify(this.value)">${[['off','Off'],['pinned','Pinned friends only'],['all','All friends']].map(([v,l])=>`<option value=${v} ${o.notify==v?'selected':''}>${l}</option>`).join('')}</select></div>
  <div class=card><b>Break reminder</b><small>Reminds you while a game launched from the hub is running. 0 = off.</small><div class=row>Every <input id=bm type=number min=0 value="${o.breakmin||0}" style="width:90px"> minutes <button class=btn onclick="save({opts:{breakmin:+$('#bm').value||0}})">Save</button></div></div>
+ <div class=card><b>Updates</b><small>Sober Hub v${esc(S.version||'')} · checks GitHub on start and every 6 hours. A newer sober_hub.py in the repo is installed automatically (the old file is kept as sober_hub.py.bak).</small><label class=row style="margin:8px 0"><input type=checkbox ${o.autoupd!='0'?'checked':''} onchange="save({opts:{autoupd:this.checked?'1':'0'}})"> Update automatically</label><button class=btn onclick="updNow(this)">Check for updates now</button></div>
  ${hiddenCard()}<div class=card><b>Keyboard shortcuts</b><small><code>Ctrl+K</code> quick jump to tabs/games/links · <code>/</code> focus search · <code>Esc</code> close pop-ups</small></div>`},
 style(){return `<h2>Style & CSS</h2><div class=card><b>Presets</b><div class=row>${Object.keys(PRESETS).map(k=>`<button class="btn alt" onclick="preset('${k}')">${k}</button>`).join('')}</div>
  <div class=row style="margin-top:10px">${['bg','panel','accent','green','text'].map(k=>`${k} <input type=color value="${S.theme[k]}" onchange="save({theme:{${k}:this.value}},1)">`).join(' ')} radius <input type=range min=0 max=30 value=${S.theme.radius} oninput="save({theme:{radius:this.value}},1)"> font <select onchange="save({theme:{font:this.value}},1)">${['system-ui','monospace','Georgia','Verdana'].map(f=>`<option ${S.theme.font==f?'selected':''}>${f}</option>`).join('')}</select></div>
@@ -988,7 +1120,9 @@ style(){return `<h2>Style & CSS</h2><div class=card><b>Presets</b><div class=row
  <button class=btn onclick="save({css:$('#css').value})">Apply & save</button><button class="btn alt" onclick="$('#css').value=TEMPLATE;$('#css').oninput()">Insert template</button><button class="btn alt" onclick="$('#css').value='';$('#css').oninput()">Clear</button></div>`},
 data(){return `<h2>Data</h2><div class=card><button class=btn onclick="exp()">Export backup</button><label class="btn alt">Import<input type=file hidden onchange="imp(this.files[0])"></label><button class="btn alt" onclick="expCSV()">Playtime CSV</button>${S.connected?'<button class="btn alt" onclick="expFriends()">Friends CSV</button>':''}<button class="btn alt" onclick="ask('Reset all playtime?',{ok:'Reset',danger:1}).then(y=>y&&api('clear',{what:['play','daily']}).then(load))">Reset playtime</button></div><small>Stored in ~/.config/sober-hub/data.json (permissions 600). Backups never include your Roblox cookie.</small>`},
 account(){const u=S.user;return `<h2>Account</h2>${u?`<div class=card><div class=row><img class=av src="${esc(u.avatar)}"><div><b>${esc(u.display)}</b> @${esc(u.name)}<small>${S.connected?'✅ Connected':'Public profile only'} · ${u.friends} friends · joined ${u.created}${u.robux!=null?' · R$ '+u.robux.toLocaleString():''}</small></div></div><button class="btn alt" onclick="api('disconnect',{}).then(load)">${S.connected?'Disconnect & delete cookie':'Sign out'}</button></div>`:''}
- ${S.connected?'':`<div class=card><b>Connect Roblox</b><small>Unlocks friends, who's in-game, join friend, Robux. Paste your <code>.ROBLOSECURITY</code> cookie (browser devtools → Storage/Application → Cookies → roblox.com).</small>
+ ${S.connected?'':`<div class=card><b>Log in with Quick Login</b><small>No cookie to copy. The hub shows a code; you approve it on roblox.com while you're logged in there (the same flow Roblox uses to sign in on a TV). Your password is never typed into the hub.</small>
+ <div id=qlbox><button class=btn onclick="qlStart()">Get a login code</button></div></div>
+ <div class=card><b>Log in with a cookie</b><small>Paste your <code>.ROBLOSECURITY</code> cookie (browser devtools → Storage/Application → Cookies → roblox.com).</small>
  <p style="color:#f68802">⚠ This cookie is a login key. Anyone who has it controls your account. It is stored only on this PC (file mode 600) and only ever sent to *.roblox.com. Never paste it anywhere else, and log out on roblox.com to revoke it.</p>
  <input id=ck type=password placeholder=".ROBLOSECURITY value" style="width:100%"><button class=btn onclick="connect()">Connect</button></div>
  <div class=card><b>Or just look up a profile (no login)</b><div class=row><input id=un placeholder=Username><button class="btn alt" onclick="signin()">Look up</button></div></div>`}
@@ -1040,7 +1174,27 @@ async function bulkReq(a){if(!RQ.length||!await ask((a[0]=='a'?'Accept':'Decline
 const fr=(id,a)=>guard(rb(`https://friends.roblox.com/v1/users/${id}/${a}`,{}),'Done').then(()=>load().then(()=>tab=='friends'&&AFTER.friends()));
 const unfriend=id=>ask('Remove this friend?',{ok:'Remove',danger:1}).then(y=>y&&fr(id,'unfriend'));
 const blockU=id=>ask('Block this user?',{ok:'Block',danger:1}).then(y=>y&&guard(rb(`https://accountsettings.roblox.com/v1/users/${id}/block`,{}),'Blocked'));
+let QLT=null;
+function qlStop(){clearInterval(QLT);QLT=null}
+async function qlStart(){const b=$('#qlbox');b.innerHTML='Asking Roblox for a code…';const r=await api('ql_start',{});if(r.error){b.innerHTML=`<small style="color:#e5484d">${esc(r.error)}</small><button class=btn onclick="qlStart()">Try again</button>`;return}
+ b.innerHTML=`<div style="font:800 34px monospace;letter-spacing:.2em;margin:10px 0">${esc(r.code)}</div><small>1. On a device where you're logged in, open <a href="#" onclick="open_('https://www.roblox.com/crossdevicelogin/ConfirmCode');return false">roblox.com/crossdevicelogin/ConfirmCode</a><br>2. Enter this code and confirm.<br>The code expires in about 5 minutes.</small><div class=row style="margin-top:10px"><button class=btn onclick="open_('https://www.roblox.com/crossdevicelogin/ConfirmCode')">Open that page</button><button class="btn alt" onclick="qlCancel()">Cancel</button><span id=qls style="color:var(--muted)">Waiting for you to confirm…</span></div>`;
+ qlStop();QLT=setInterval(async()=>{if(!$('#qlbox'))return qlStop();const p=await api('ql_poll',{});if(!$('#qls')&&p.state!='done')return;
+  if(p.error){qlStop();$('#qlbox').innerHTML=`<small style="color:#e5484d">${esc(p.error)}. You can use the cookie method below instead.</small><button class=btn onclick="qlStart()">Try again</button>`;return}
+  if(p.state=='linked')$('#qls').textContent='Code entered - approve it on your other device…';
+  else if(p.state=='done'){qlStop();toast('Logged in!');go('home')}
+  else if(p.state=='expired'||p.state=='cancelled'||p.state=='none'){qlStop();$('#qlbox').innerHTML=`<small>${p.state=='expired'?'That code expired.':'Login cancelled.'}</small><button class=btn onclick="qlStart()">Get a new code</button>`}},2000)}
+async function qlCancel(){qlStop();await api('ql_cancel',{});if($('#qlbox'))$('#qlbox').innerHTML='<button class=btn onclick="qlStart()">Get a login code</button>'}
 async function connect(){const r=await api('connect',{cookie:$('#ck').value});r.error?toast(r.error):(toast('Connected!'),go('home'))}
+// ---- auto update popups
+async function updRestart(){await api('upd_restart',{});toast('Restarting Sober Hub…',20000);setTimeout(()=>{const t=setInterval(async()=>{try{const r=await fetch('/api/upd_status');if(r.ok){clearInterval(t);location.reload()}}catch(e){}},700)},1800)}
+async function updShow(u,manual){
+ if(u.state=='installed'){await api('upd_ack',{});const y=await ask('Version '+u.version+' is installed. Restart Sober Hub to start using it.',{title:'sober_hub updated automatically!',ok:'Restart now',danger:0});if(y)updRestart()}
+ else if(u.state=='failed'){await api('upd_ack',{});await ask('Version '+u.version+' is available on GitHub, but it could not be installed: '+u.error+'.\n\nYou are still on version '+u.cur+' and your current file was not changed.',{title:'Update found but failed to install',ok:'OK',info:1})}
+ else if(manual){u.state=='current'?toast('You are on the latest version (v'+u.cur+')',4000):toast(u.error||'Could not check for updates',6000)}}
+async function updNow(b){b.disabled=true;toast('Checking GitHub…',15000);const u=await api('upd_check',{});b.disabled=false;$('#toast').style.display='none';updShow(u,true)}
+async function updPoll(){const u=await api('upd_status',{});if(u.error&&!u.state)return;
+ if(u.notice){await api('upd_ack',{});await ask('Version '+u.notice.version+' is now installed (you were on '+u.notice.old+').',{title:'sober_hub updated automatically!',ok:'Nice',info:1})}
+ else if((u.state=='installed'||u.state=='failed')&&!u.shown)updShow(u)}
 async function signin(){const r=await api('user',{name:$('#un').value});r.error?toast(r.error):load()}
 function rnd(){const g=S.favs[Math.random()*S.favs.length|0];play(g.place,g.name,g.icon)}
 async function surprise(){const d=DISC.length?DISC:await api('discover'),all=(d.error?[]:d).flatMap(s=>s.games).filter(g=>!hidSet().has(String(g.place)));if(!all.length)return toast('Nothing to pick from');openGame(all[Math.random()*all.length|0].place)}
@@ -1493,7 +1647,7 @@ function cmdk(){if($('#modal'))return $('#modal').remove();const m=document.crea
   CML=out.slice(0,12);$('#cl2').innerHTML=CML.map((x,i)=>`<a class=cmd onclick="cmRun(${i})">${esc(x.t)}</a>`).join('')};
  inp.oninput=draw;inp.onkeydown=e=>{if(e.key=='Enter')cmRun(0)};draw();inp.focus()}
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()=='k'){e.preventDefault();cmdk()}else if(e.key=='Escape'){$('#modal')&&$('#modal').remove()}else if(e.key=='/'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){e.preventDefault();$('#ts')&&$('#ts').focus()}});
-load().then(()=>{chatWatch();setInterval(chatWatch,45000);pollActive();setInterval(pollActive,15000);watch();setInterval(watch,60000)});
+load().then(()=>{updPoll();setInterval(updPoll,60000);chatWatch();setInterval(chatWatch,45000);pollActive();setInterval(pollActive,15000);watch();setInterval(watch,60000)});
 </script></body></html>"""
 
 def install_shortcut():
@@ -1508,8 +1662,16 @@ def install_shortcut():
 
 if __name__ == "__main__":
     if "--install" in sys.argv: sys.exit(install_shortcut())
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
     os.makedirs(D, mode=0o700, exist_ok=True)
+    want = int(os.environ.pop("SOBER_HUB_PORT", "0") or 0)   # set only when the hub restarts itself after an update
+    if not want and "--no-update" not in sys.argv and load()["opts"].get("autoupd", "1") != "0":
+        if update_check(startup=True)["state"] == "installed":
+            try: restart()   # the new process shows "sober_hub updated automatically!"
+            except Exception: pass
+    try: srv = ThreadingHTTPServer(("127.0.0.1", want), H)
+    except OSError: srv = ThreadingHTTPServer(("127.0.0.1", 0), H); want = 0
+    PORT[0] = srv.server_port
+    threading.Thread(target=_upd_loop, daemon=True).start()
     serving = False
     try:
         import webview   # optional (pip install pywebview): native window without an address bar
@@ -1534,10 +1696,11 @@ if __name__ == "__main__":
             print("Native window unavailable (" + str(e) + "), using the browser instead.")
     url = f"http://sober-hub.localhost:{srv.server_port}/"
     print("Sober Hub running at", url, "(install pywebview for a native window)")
-    for b in ("brave-browser", "brave", "chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "microsoft-edge"):
+    for b in (() if want else ("brave-browser", "brave", "chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "microsoft-edge")):
         if shutil.which(b):
             # Separate browser profile and window class keep this window apart from your normal browser and let it use the shortcut's icon.
             subprocess.Popen([b, f"--app={url}", f"--class={WMCLASS}", f"--name={WMCLASS}", "--user-data-dir=" + D + "/browser",
                               "--no-first-run", "--no-default-browser-check"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); break
-    else: webbrowser.open(url)
+    else:
+        if not want: webbrowser.open(url)   # on a self-restart the existing window just reloads
     threading.Event().wait() if serving else srv.serve_forever()
