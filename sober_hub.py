@@ -31,11 +31,10 @@ import ast, base64, json, math, os, re, shlex, sys, shutil, subprocess, threadin
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-VERSION = "5.1.1"   # bump this and push the file to GitHub to roll out an update
+VERSION = "5.1.2"   # bump this and push the file to GitHub to roll out an update
 WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release
-    "Auto-update from GitHub, with a clear message if an update can't be installed",
-    "New Quick Login: sign in with a code, no cookie needed (cookie login still works)",
-    "Hub Settings has a new Updates card with a manual check and an on/off switch",
+    "Sunset is now the default theme (you keep your own theme if you picked one)",
+    "The Home banner now follows your accent color",
 ]
 REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
 ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
@@ -44,7 +43,8 @@ SC = os.path.expanduser("~/.var/app/org.vinegarhq.Sober/config/sober/config.json
 APP = "org.vinegarhq.Sober"
 DEF = {"user": None, "favs": [], "history": [], "play": {}, "notes": {}, "css": "", "daily": {}, "pinned": [], "collections": {}, "hidden_games": [], "hidden_chat": {}, "privs": [], "upd_notice": None, "capi": {"url": "", "method": "GET", "headers": "", "body": "", "path": ""},
        "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "breakmin": 0, "autoupd": "1"},
-       "theme": {"bg": "#18191d", "panel": "#232527", "accent": "#335fff", "green": "#00b06f", "text": "#f7f7f8", "radius": "8", "font": "system-ui", "tile": "150", "compact": "0"}}
+       "theme": {"bg": "#1a1210", "panel": "#271a16", "accent": "#ff8a3d", "green": "#ff8a3d", "text": "#fff0e6", "radius": "8", "font": "system-ui", "tile": "150", "compact": "0"}}
+OLD_THEME = {"bg": "#18191d", "panel": "#232527", "accent": "#335fff", "green": "#00b06f", "text": "#f7f7f8"}   # the previous default (the "Roblox Dark" preset)
 lock = threading.Lock()
 ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 6 222 222"><path fill="#FDD758" fill-rule="evenodd" d="M57.0 16.0 L218.0 58.0 L172.0 219.0 L15.0 177.0ZM106.4 99.9 L135.1 107.4 L127.6 136.1 L98.9 128.6Z"/></svg>"""
 WMCLASS = "SoberHub"
@@ -83,6 +83,10 @@ def load():
         d.setdefault(k, json.loads(json.dumps(v)))
         if k in ("opts", "theme"):
             for kk, vv in v.items(): d[k].setdefault(kk, vv)
+    if not d.get("sunset_default"):
+        d["sunset_default"] = True
+        if all(d["theme"].get(k) == v for k, v in OLD_THEME.items()):
+            for k in OLD_THEME: d["theme"][k] = DEF["theme"][k]
     return d
 def store(d):
     """Write data.json atomically (temp file + rename) with owner-only permissions."""
@@ -936,7 +940,7 @@ class H(BaseHTTPRequestHandler):
 
 HTML = r"""<!doctype html><html><head><meta charset=utf-8><title>Sober Hub</title><link rel=icon type="image/svg+xml" href="/favicon.svg">
 <style>
-:root{--bg:#18191d;--panel:#232527;--accent:#335fff;--green:#00b06f;--text:#f7f7f8;--muted:#9a9ca1;--radius:8px;--font:system-ui;--tile:150px}
+:root{--bg:#1a1210;--panel:#271a16;--accent:#ff8a3d;--green:#ff8a3d;--text:#fff0e6;--muted:#9a9ca1;--radius:8px;--font:system-ui;--tile:150px}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px var(--font),sans-serif}
 header{position:fixed;top:0;left:0;right:0;height:48px;background:var(--panel);display:flex;align-items:center;gap:14px;padding:0 16px;z-index:5;border-bottom:1px solid #ffffff10}
 header .logo{font-weight:800;font-size:19px;letter-spacing:-.5px;white-space:nowrap}header .sp{flex:1}
@@ -974,7 +978,7 @@ table{width:100%;border-collapse:collapse}td{padding:7px;border-bottom:1px solid
 .btn.danger{background:#e5484d}@keyframes dlgin{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
 #toast{position:fixed;bottom:20px;right:20px;background:var(--accent);padding:10px 18px;border-radius:var(--radius);display:none;z-index:99;max-width:380px}
 .av{width:72px;height:72px;border-radius:50%}
-.hero{background:linear-gradient(90deg,var(--panel),#335fff33)}.hero img{width:96px;height:96px;border-radius:var(--radius)}details{padding:6px 0;border-bottom:1px solid #ffffff10}summary{cursor:pointer}
+.hero{background:linear-gradient(90deg,var(--panel),color-mix(in srgb,var(--accent) 22%,transparent))}.hero img{width:96px;height:96px;border-radius:var(--radius)}details{padding:6px 0;border-bottom:1px solid #ffffff10}summary{cursor:pointer}
 .chart{display:flex;align-items:flex-end;gap:6px;height:130px}.chart div{flex:1;text-align:center}.chart i{display:block;background:var(--green);border-radius:4px 4px 0 0;min-height:2px}.chart small{font-size:10px}
 .cmd{display:block;padding:8px 12px;border-radius:var(--radius);cursor:pointer}.cmd:hover{background:#ffffff14}#ctx{animation:cx .09s ease-out}#ctx .cmd{padding:7px 12px;font-size:14px}@keyframes cx{from{opacity:0;transform:scale(.97)}}
 body.compact #main{padding:14px 18px}body.compact .card{padding:10px;margin-bottom:8px}body.compact nav a{padding:6px 12px}body.compact td{padding:3px 6px}body.compact h3{margin:12px 0 6px}
@@ -1020,11 +1024,11 @@ const TABS={home:'🏠 Home',games:'🎮 Discover',library:'📚 Library',privs:
 const PRESETS={'Roblox Dark':['#18191d','#232527','#335fff','#f7f7f8','#00b06f'],'Roblox Light':['#e4e6ea','#ffffff','#335fff','#1b1e2b','#00b06f'],Amoled:['#000000','#0c0c0c','#00e5a0','#ffffff','#00e5a0'],Rose:['#1a1016','#26171f','#ff6b9d','#ffe8f0','#ff6b9d'],Sunset:['#1a1210','#271a16','#ff8a3d','#fff0e6','#ff8a3d'],Ocean:['#0b1620','#12212f','#2f9bff','#e6f3ff','#19c3a6'],Forest:['#101712','#17221a','#4caf50','#e8f5e9','#8bc34a'],Purple:['#150f1f','#20172e','#9b59ff','#f1e8ff','#c77dff'],Mono:['#111111','#1b1b1b','#888888','#eeeeee','#aaaaaa']};
 const TEMPLATE=`/* ===== Sober Hub CSS template — edit & press Apply ===== */
 :root{
-  --bg:#18191d;      /* page background */
-  --panel:#232527;   /* header, sidebar, cards */
-  --accent:#335fff;  /* buttons */
-  --green:#00b06f;   /* Play button, bars, online dot */
-  --text:#f7f7f8;
+  --bg:#1a1210;      /* page background */
+  --panel:#271a16;   /* header, sidebar, cards */
+  --accent:#ff8a3d;  /* buttons */
+  --green:#ff8a3d;   /* Play button, bars, online dot */
+  --text:#fff0e6;
   --muted:#9a9ca1;
   --radius:8px;
 }
