@@ -31,7 +31,7 @@ import base64, json, math, os, re, shlex, sys, shutil, subprocess, threading, ti
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-VERSION = "5.1.0"   # bump this and push the file to GitHub to roll out an update
+VERSION = "5.0.0"   # bump this and push the file to GitHub to roll out an update
 REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
 ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
 D = os.path.expanduser("~/.config/sober-hub"); F = D + "/data.json"
