@@ -1,4 +1,4 @@
-zz> ### ⚠️ WARNING & DISCLAIMER
+> ### ⚠️ WARNING & DISCLAIMER
 > **This app was written with Claude and tested by a human. It can use your Roblox login cookie. Use it at your own risk.**
 > - Run it only on your own computer. **Never host it on a cloud server or expose it to a network.**
 > - **I am not responsible for any bans, lost items, lost Robux or anything else caused by this software.**
