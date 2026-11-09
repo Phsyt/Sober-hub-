@@ -31,10 +31,11 @@ import ast, base64, json, math, os, re, shlex, sys, shutil, subprocess, threadin
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-VERSION = "5.1.2"   # bump this and push the file to GitHub to roll out an update
+VERSION = "5.1.3"   # bump this and push the file to GitHub to roll out an update
 WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release
     "Sunset is now the default theme (you keep your own theme if you picked one)",
     "The Home banner now follows your accent color",
+    "patched some bugs",
 ]
 REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
 ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
@@ -42,7 +43,7 @@ D = os.path.expanduser("~/.config/sober-hub"); F = D + "/data.json"
 SC = os.path.expanduser("~/.var/app/org.vinegarhq.Sober/config/sober/config.json")
 APP = "org.vinegarhq.Sober"
 DEF = {"user": None, "favs": [], "history": [], "play": {}, "notes": {}, "css": "", "daily": {}, "pinned": [], "collections": {}, "hidden_games": [], "hidden_chat": {}, "privs": [], "upd_notice": None, "capi": {"url": "", "method": "GET", "headers": "", "body": "", "path": ""},
-       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "breakmin": 0, "autoupd": "1"},
+       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "autoupd": "1"},
        "theme": {"bg": "#1a1210", "panel": "#271a16", "accent": "#ff8a3d", "green": "#ff8a3d", "text": "#fff0e6", "radius": "8", "font": "system-ui", "tile": "150", "compact": "0"}}
 OLD_THEME = {"bg": "#18191d", "panel": "#232527", "accent": "#335fff", "green": "#00b06f", "text": "#f7f7f8"}   # the previous default (the "Roblox Dark" preset)
 lock = threading.Lock()
@@ -117,8 +118,12 @@ def req(url, body=None, method=None, timeout=12):
             if e.code == 403 and e.headers.get("x-csrf-token"): return go(e.headers["x-csrf-token"])
             raise
     except urllib.error.HTTPError as e:
-        try: m = json.loads(e.read())["errors"][0]["message"]
-        except Exception: m = f"Roblox returned HTTP {e.code}"
+        m = None
+        try:
+            j = json.loads(e.read()); er = j.get("errors")
+            m = (er[0].get("message") if er else None) or j.get("message") or j.get("errorMsg") or j.get("reason") or j.get("title")
+        except Exception: pass
+        m = m or f"Roblox returned HTTP {e.code}"
         raise Exception(m)
 
 def thumbs(kind, ids, size="150x150"):
@@ -451,8 +456,12 @@ def _rpost(url, body):
             if e.code == 403 and e.headers.get("x-csrf-token"): return go(e.headers["x-csrf-token"])
             raise
     except urllib.error.HTTPError as e:
-        try: m = json.loads(e.read())["errors"][0]["message"]
-        except Exception: m = f"Roblox returned HTTP {e.code}"
+        m = None
+        try:
+            j = json.loads(e.read()); er = j.get("errors")
+            m = (er[0].get("message") if er else None) or j.get("message") or j.get("errorMsg") or j.get("reason") or j.get("title")
+        except Exception: pass
+        m = m or f"Roblox returned HTTP {e.code}"
         raise Exception(m)
 
 QL = {}   # the one Quick Login in progress: {"code", "key", "t0"}; the key never leaves this process
@@ -989,7 +998,7 @@ const $=s=>document.querySelector(s);
 let S={},tab='home',PT='games',cur=null,FR=[],pendingQ='',PU='',LP=null,RC=[],DISC=[],ACT=[],PREV=null,FQ='',FSORT='status',HQ='',SV=[],SVC=null,SVS='Asc',MT='Inbox',MP=0,SOB={};
 let CV=[],CVC=null,CID=null,CVT=null,CLAST='',CUN=-1;
 let GM={},PVL=[],MYP=[],PVM={},CTXI=[];
-const BRK={},HEALED=new Set(),ORD={2:0,1:1,3:2,0:3};
+const HEALED=new Set(),ORD={2:0,1:1,3:2,0:3};
 // api(route, body?) -> JSON from this hub's backend (POST when a body is given).
 const api=(p,b)=>fetch('/api/'+p,b?{method:'POST',body:JSON.stringify(b)}:{}).then(r=>r.json());
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1057,7 +1066,7 @@ async function badge(){if(!S.connected)return;const r=await rb('https://friends.
 async function chatWatch(){if(!S.connected)return;const m=await rb(CHAT+'get-conversation-metadata'),n=m&&m.global_unread_message_count;if(n==null)return;if(CUN>=0&&n>CUN&&tab!='chat')notify('New Roblox message',n-CUN+' unread — open Chats');CUN=n}
 function notify(t,b){toast(b?t+' — '+b:t,6000);try{if('Notification' in window&&Notification.permission=='granted')new Notification(t,{body:b||''})}catch(e){}}
 async function pollActive(){const r=await api('active');ACT=Array.isArray(r)?r:[];const e=$('#act');if(e)e.outerHTML=actHTML();
- const bm=+(S.opts&&S.opts.breakmin)||0;if(bm)ACT.forEach(a=>{const n=Math.floor(a.secs/(bm*60));if(n>(BRK[a.place]||0)){BRK[a.place]=n;notify('Time for a break?',`You have been playing ${a.name} for ${fmt(a.secs)}`)}})}
+ }
 function setTitle(l){const n=l.filter(f=>f.status==2).length;document.title=(n?`(${n}) `:'')+'Sober Hub'}
 async function watch(){if(!S.connected||!S.opts||S.opts.notify=='off')return;const l=await api('friends');if(!Array.isArray(l))return;setTitle(l);
  if(PREV){const pn=new Set(S.pinned||[]);l.forEach(f=>{const o=PREV[f.id];if(o==null||o==f.status)return;if(S.opts.notify=='pinned'&&!pn.has(f.id))return;
@@ -1131,7 +1140,6 @@ hub(){const o=S.opts;return `<h2>Hub settings</h2>
   <small id=capir></small></details></div>
  <div class=card><b>Home hero (top game)</b><small>Which game is shown at the top of Home.</small><select onchange="save({opts:{hero:this.value}})"><option value=hub ${o.hero!='roblox'?'selected':''}>Last game I launched from Sober Hub</option><option value=roblox ${o.hero=='roblox'?'selected':''}>First game in my Roblox Continue list</option></select></div>
  <div class=card><b>Friend notifications</b><small>Desktop notification when friends start playing (checked every minute while the hub is open).</small><select onchange="setNotify(this.value)">${[['off','Off'],['pinned','Pinned friends only'],['all','All friends']].map(([v,l])=>`<option value=${v} ${o.notify==v?'selected':''}>${l}</option>`).join('')}</select></div>
- <div class=card><b>Break reminder</b><small>Reminds you while a game launched from the hub is running. 0 = off.</small><div class=row>Every <input id=bm type=number min=0 value="${o.breakmin||0}" style="width:90px"> minutes <button class=btn onclick="save({opts:{breakmin:+$('#bm').value||0}})">Save</button></div></div>
  <div class=card><b>Updates</b><small>Sober Hub v${esc(S.version||'')} · checks GitHub on start and every 6 hours. A newer sober_hub.py in the repo is installed automatically (the old file is kept as sober_hub.py.bak).</small><label class=row style="margin:8px 0"><input type=checkbox ${o.autoupd!='0'?'checked':''} onchange="save({opts:{autoupd:this.checked?'1':'0'}})"> Update automatically</label><button class=btn onclick="updNow(this)">Check for updates now</button></div>
  ${hiddenCard()}<div class=card><b>Keyboard shortcuts</b><small><code>Ctrl+K</code> quick jump to tabs/games/links · <code>/</code> focus search · <code>Esc</code> close pop-ups</small></div>`},
 style(){return `<h2>Style & CSS</h2><div class=card><b>Presets</b><div class=row>${Object.keys(PRESETS).map(k=>`<button class="btn alt" onclick="preset('${k}')">${k}</button>`).join('')}</div>
@@ -1448,20 +1456,29 @@ async function cat(){const free=$('#cf').checked?'&MinPrice=0&MaxPrice=0':'',q=$
  $('#cat').innerHTML=CAT.map((x,i)=>{const bun=x.itemType=='Bundle',im=(bun?tb:ta)[x.id]||'',pr=x.price==null?(x.priceStatus=='NoResellers'?'No resellers':'Off sale'):x.price?'R$ '+x.price:'Free';
   return `<div class=tile><img src="${esc(im)}" onclick="open_('https://www.roblox.com/${bun?'bundles':'catalog'}/${x.id}')"><b>${esc(x.name)}</b><small>${pr} · ${esc(x.creatorName||'')}</small>${buyable(x)?`<button class="btn sm" onclick="buy(${i})">Buy</button>`:''}${bun?`<button class="btn alt sm" onclick="wearBundle(${x.id})">Wear</button>`:''}</div>`}).join('')||'<small>No results</small>'}
 async function buy(i){const x=CAT[i];if(!x)return;
- let pid=x.productId,price=x.price,seller=x.creatorTargetId,sale=true;
+ const bun=x.itemType=='Bundle',sellers=[],addS=v=>{v=Number(v);if(v>0&&!sellers.includes(v))sellers.push(v)};
+ let pid=x.productId,price=x.price,sale=true;
  try{   // re-read the authoritative product info instead of trusting search-result fields
-  if(x.itemType=='Bundle'){const d=await rb(`https://catalog.roblox.com/v1/bundles/${x.id}/details`);
-   if(!d.error&&d.product){pid=d.product.id;price=d.product.priceInRobux??0;sale=d.product.isForSale!==false;if(d.creator&&d.creator.id!=null)seller=d.creator.id}}
+  if(bun){const d=await rb(`https://catalog.roblox.com/v1/bundles/${x.id}/details`);
+   if(!d.error&&d.product){pid=d.product.id||pid;if(d.product.priceInRobux!=null)price=d.product.priceInRobux;sale=d.product.isForSale!==false;addS(d.product.sellerId);if(d.creator)addS(d.creator.id)}}
   else{const d=await rb(`https://economy.roblox.com/v2/assets/${x.id}/details`);
-   if(!d.error&&d.ProductId){pid=d.ProductId;price=d.PriceInRobux??0;sale=d.IsForSale!==false;if(d.Creator&&d.Creator.Id!=null)seller=d.Creator.Id}}
+   if(!d.error&&d.ProductId){pid=d.ProductId;if(d.PriceInRobux!=null)price=d.PriceInRobux;sale=d.IsForSale!==false;if(d.Creator){addS(d.Creator.CreatorTargetId);addS(d.Creator.Id)}}}
  }catch(e){}
+ addS(x.creatorTargetId);
+ price=Number(price)||0;
  if(!pid)return toast('Could not read purchase info for this item',4500);
  if(!sale)return toast('This item is not for sale right now',4500);
- seller=Number(seller);if(!seller)return toast('Could not read the seller for this item',4500);
+ if(!sellers.length)return toast('Could not read the seller for this item',4500);
  if(!await ask(`Buy "${x.name}" for ${price?'R$ '+price:'free'}?\nYour balance: R$ ${S.user.robux??'?'}`,{ok:'Buy',title:'Confirm purchase'}))return;
- const r=await rb(`https://economy.roblox.com/v1/purchases/products/${pid}`,{expectedCurrency:1,expectedPrice:Number(price)||0,expectedSellerId:seller});
- if(r.error)return toast(r.error,5000);
- toast(r.purchased?(x.itemType=='Bundle'?'Purchased! Press Wear on it, or find it in Avatar > Wardrobe > Bundles':'Purchased! Find it in Avatar > Wardrobe'):(r.errorMsg||r.reason||r.title||'Not purchased'),5000);
+ let r={},msg='';
+ for(const sl of sellers){   // Roblox answers "invalid arguments" when the seller id is the wrong one of the creator ids, so try each
+  r=await rb(`https://economy.roblox.com/v1/purchases/products/${pid}`,{expectedCurrency:1,expectedPrice:price,expectedSellerId:sl});
+  msg=String(r.error||r.errorMsg||r.reason||r.title||'');
+  if(r.purchased||!/invalid|argument|seller|mismatch/i.test(msg))break}
+ if(!r.purchased&&/invalid|argument/i.test(msg)){
+  if(await ask(`Roblox rejected the purchase (${msg}).\nOpen the item page to buy it there instead?`,{ok:'Open page',title:'Could not buy here'}))open_(`https://www.roblox.com/${bun?'bundles':'catalog'}/${x.id}`);return}
+ if(r.error&&!r.purchased)return toast(r.error,5000);
+ toast(r.purchased?(bun?'Purchased! Press Wear on it, or find it in Avatar > Wardrobe > Bundles':'Purchased! Find it in Avatar > Wardrobe'):(msg||'Not purchased'),5000);
  api('me').then(u=>{if(u.robux!=null){S.user=u;const e=$('header .pill:not(#act)');e&&(e.textContent='R$ '+u.robux.toLocaleString())}})}
 // ---- profile lookup
 async function prof(){const r=await rb('https://users.roblox.com/v1/usernames/users',{usernames:[$('#pu').value],excludeBannedUsers:true}),u=r.data&&r.data[0];if(!u)return $('#pf').innerHTML='User not found';
