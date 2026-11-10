@@ -31,11 +31,20 @@ import ast, base64, json, math, os, re, shlex, sys, shutil, subprocess, threadin
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-VERSION = "5.1.3"   # bump this and push the file to GitHub to roll out an update
+VERSION = "5.2.0"   # bump this and push the file to GitHub to roll out an update
 WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release
-    "Sunset is now the default theme (you keep your own theme if you picked one)",
-    "The Home banner now follows your accent color",
-    "patched some bugs",
+    "Friend notifications rebuilt: animated pop-up cards with avatar, game icon, sound and a Join button (pinned friends or everyone, plus a Test button in Hub Settings)",
+    "Desktop alerts now also go through your system (notify-send) so they show up even when the hub is in the background",
+    "New Avatar editor: live render with Full / Bust / Head views, category tabs, instant wear/remove, Undo, outfits and bundles",
+    "Catalog search fixed (no more 'invalid argument') and buying is more reliable",
+    "Games started from the hub now close back to Sober Hub instead of Sober's home screen (switch in Hub Settings)",
+    "Pressing Play now lets you rejoin your old server: the hub remembers which server you landed in, so Rejoin last server / Last server works even when you started with plain Play (needs a connected account)",
+    "Private servers you own or rent now have a Join button on the Private Servers tab, and each one shows which game it is for",
+    "Profile lookup now loads the whole profile: online status, avatar, about, past usernames, social links, Roblox badges, what they are wearing, groups, friends, created and favorite experiences and recent badges",
+    "Profile lookup no longer shows Add friend for people you are already friends with (it shows Friends, Request sent or Accept request instead, plus a Message button)",
+    "Block now blocks the person on your real Roblox account (not just in Sober Hub), with an Unblock button on their profile and a Blocked users list on the Profile tab",
+    "The in-app Catalog (which kept failing with 'invalid argument') is gone: the Catalog tab now opens roblox.com/catalog in your browser",
+    "Online, in-game and pinned friends get their usernames looked up first (with retries and a saved name cache), so Home no longer shows them as User (id)",
 ]
 REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
 ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
@@ -43,28 +52,37 @@ D = os.path.expanduser("~/.config/sober-hub"); F = D + "/data.json"
 SC = os.path.expanduser("~/.var/app/org.vinegarhq.Sober/config/sober/config.json")
 APP = "org.vinegarhq.Sober"
 DEF = {"user": None, "favs": [], "history": [], "play": {}, "notes": {}, "css": "", "daily": {}, "pinned": [], "collections": {}, "hidden_games": [], "hidden_chat": {}, "privs": [], "upd_notice": None, "capi": {"url": "", "method": "GET", "headers": "", "body": "", "path": ""},
-       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "autoupd": "1"},
+       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "autoupd": "1", "nsound": "1", "nonline": "1", "ndesk": "1", "backhub": "1"},
        "theme": {"bg": "#1a1210", "panel": "#271a16", "accent": "#ff8a3d", "green": "#ff8a3d", "text": "#fff0e6", "radius": "8", "font": "system-ui", "tile": "150", "compact": "0"}}
 OLD_THEME = {"bg": "#18191d", "panel": "#232527", "accent": "#335fff", "green": "#00b06f", "text": "#f7f7f8"}   # the previous default (the "Roblox Dark" preset)
 lock = threading.Lock()
 ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="6 6 222 222"><path fill="#FDD758" fill-rule="evenodd" d="M57.0 16.0 L218.0 58.0 L172.0 219.0 L15.0 177.0ZM106.4 99.9 L135.1 107.4 L127.6 136.1 L98.9 128.6Z"/></svg>"""
 WMCLASS = "SoberHub"
+WIN = [None]   # the pywebview window, when there is one
+CLK = threading.Lock(); COL = {"n": 0}   # close_on_leave bookkeeping for games launched from the hub
 ACTIVE = {}   # place id -> {"name", "t0"} for games launched from the hub that are still running
 
 def chunks(l, n):
     """Yield n-sized slices of l; Roblox endpoints cap how many ids one request may carry."""
     for i in range(0, len(l), n): yield l[i:i + n]
 
-NAMES = {}   # user id -> (username, display name), cache for blank friend-list names
-def names(fl):
-    """The friends list can come back with blank names, so missing ones are resolved through the users API (cached)."""
+NAMES = {}   # user id -> (username, display name), cache for blank friend-list names (also kept in names.json between runs)
+NF = D + "/names.json"
+def _nload():
+    try:
+        for k, v in json.load(open(NF)).items(): NAMES.setdefault(int(k), (v[0], v[1]))
+    except Exception: pass
+def _nsave():
+    try:
+        os.makedirs(D, mode=0o700, exist_ok=True); tmp = NF + ".tmp"
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f: json.dump({str(k): list(v) for k, v in NAMES.items()}, f)
+        os.replace(tmp, NF)
+    except Exception: pass
+_nload()
+def names(fl, singles=40):
+    """The friends list can come back with blank names, so missing ones are resolved through the users API (cached, retried, saved to disk)."""
     need = [f["id"] for f in fl if not (f.get("name") and f.get("displayName")) and f["id"] not in NAMES]
-    def one(c):
-        try: return req("https://users.roblox.com/v1/users", {"userIds": c, "excludeBannedUsers": False})["data"]
-        except Exception: return []
-    with ThreadPoolExecutor(4) as ex:
-        for rows in ex.map(one, chunks(need, 100)):
-            for x in rows: NAMES[x["id"]] = (x.get("name") or "", x.get("displayName") or x.get("name") or "")
+    if need: resolve(need, singles)
     out = {}
     for f in fl:
         n, dn = f.get("name") or "", f.get("displayName") or ""
@@ -604,7 +622,6 @@ def friends(a):
     if not u: raise Exception("Not connected")
     fl = all_friends(u["id"])
     ids = [f["id"] for f in fl]
-    nm = names(fl)
     def pres(c):
         try: return req("https://presence.roblox.com/v1/presence/users", {"userIds": c})["userPresences"]
         except Exception: return []
@@ -614,6 +631,10 @@ def friends(a):
     with ThreadPoolExecutor(4) as ex:
         pr = {p["userId"]: p for ps in ex.map(pres, chunks(ids, 50)) for p in ps}
         av = {k: v for m in ex.map(ava, chunks(ids, 100)) for k, v in m.items()}
+    pin = set(load().get("pinned") or [])
+    prio = [f for f in fl if pr.get(f["id"], {}).get("userPresenceType", 0) in (1, 2, 3) or f["id"] in pin]
+    nm = names(prio, 300)   # online, in-game and pinned friends first: full retries + single lookups, so they never show as "User 123"
+    nm.update(names([f for f in fl if f["id"] not in nm]))
     out = []
     for f in fl:
         p = pr.get(f["id"], {})
@@ -622,7 +643,7 @@ def friends(a):
     out.sort(key=lambda x: {2: 0, 1: 1, 3: 2, 0: 3}.get(x["status"], 3))
     return out
 
-def resolve(ids):
+def resolve(ids, singles=300):
     """id -> (username, display name). Cached, batched 100 at a time with retries; single lookups as a last resort."""
     need = [i for i in dict.fromkeys(ids) if i and i not in NAMES]
     for c in chunks(need, 100):
@@ -632,13 +653,14 @@ def resolve(ids):
                     if x.get("name"): NAMES[x["id"]] = (x["name"], x.get("displayName") or x["name"])
                 break
             except Exception: time.sleep(0.7 * (attempt + 1))
-    for i in [i for i in need if i not in NAMES][:300]:
+    for i in [i for i in need if i not in NAMES][:singles]:
         for attempt in range(2):
             try:
                 u = req(f"https://users.roblox.com/v1/users/{i}")
                 if u.get("name"): NAMES[i] = (u["name"], u.get("displayName") or u["name"])
                 break
             except Exception: time.sleep(0.5)
+    if need: _nsave()
     return {i: NAMES.get(i) for i in ids}
 
 def frequests(a):
@@ -666,16 +688,105 @@ def frequests(a):
         res.append({"id": i, "name": n, "display": d, "avatar": av.get(i), "mutual": len(x.get("mutualFriendsList") or [])})
     return res
 
-def track(place, t0, p, name):
+def col_enter():
+    """Turn on Sober's close_on_leave while a hub-launched game runs, so leaving the game lands back in the hub, not on Sober's home screen."""
+    if load()["opts"].get("backhub", "1") != "1": return False
+    with CLK:
+        try:
+            cfg, head = cfg_read()
+            if COL["n"] == 0:
+                with lock:
+                    d = load()
+                    if "col_orig" not in d: d["col_orig"] = {"v": cfg.get("close_on_leave")}; store(d)
+            COL["n"] += 1
+            if cfg.get("close_on_leave") is not True: cfg["close_on_leave"] = True; cfg_write(cfg, head)
+            return True
+        except Exception: return False
+
+def col_leave():
+    """Put the user's own close_on_leave value back once the last hub-launched game has ended."""
+    with CLK:
+        COL["n"] = max(0, COL["n"] - 1)
+        if COL["n"]: return
+        try:
+            with lock:
+                d = load(); o = d.pop("col_orig", None); store(d)
+            if not o: return
+            cfg, head = cfg_read()
+            if o.get("v") is None: cfg.pop("close_on_leave", None)
+            else: cfg["close_on_leave"] = o["v"]
+            cfg_write(cfg, head)
+        except Exception: pass
+
+def col_recover():
+    """If the hub was closed mid-game last time, restore the setting it changed."""
+    try:
+        if load().get("col_orig") and APP not in _run(["flatpak", "ps", "--columns=application"]).stdout: COL["n"] = 1; col_leave()
+    except Exception: pass
+
+def focus_hub():
+    """Best effort: bring the hub window to the front (pywebview, wmctrl or xdotool)."""
+    ok = False
+    try:
+        w = WIN[0]
+        if w: w.restore(); w.show(); ok = True
+    except Exception: pass
+    for cmd in (["wmctrl", "-x", "-a", WMCLASS], ["xdotool", "search", "--class", WMCLASS, "windowactivate"]):
+        try:
+            if shutil.which(cmd[0]) and _run(cmd, 5).returncode == 0: ok = True; break
+        except Exception: pass
+    return ok
+
+def icon_file(u):
+    """Download a Roblox CDN image once for use as a desktop-notification icon."""
+    try:
+        h = urllib.parse.urlparse(u or "")
+        if h.scheme != "https" or not (h.hostname or "").endswith(".rbxcdn.com"): return None
+        os.makedirs(D + "/ntf", exist_ok=True); fp = D + "/ntf/" + uuid.uuid5(uuid.NAMESPACE_URL, u).hex + ".png"
+        if not os.path.exists(fp):
+            data = OP.open(urllib.request.Request(u, headers={"User-Agent": "SoberHub"}), timeout=5).read(2000000)
+            open(fp, "wb").write(data)
+        return fp
+    except Exception: return None
+
+def dnotify(a):
+    """Native desktop notification through notify-send (works while the hub window is in the background)."""
+    if not shutil.which("notify-send"): return {"ok": False}
+    cmd = ["notify-send", "-a", "Sober Hub", "-t", "9000"]
+    ic = icon_file(a.get("icon"))
+    if ic: cmd += ["-i", ic]
+    r = _run(cmd + [str(a.get("title") or "Sober Hub")[:100], str(a.get("body") or "")[:200]], 5)
+    return {"ok": r.returncode == 0}
+
+def track(place, t0, p, name, col=False):
     """Thread body: wait for the launched Sober process to exit, then add the session to playtime stats (per game and per day, 400 days kept)."""
     p.wait(); s = time.time() - t0
     ACTIVE.pop(str(place), None)
+    if col: col_leave(); focus_hub()
     with lock:
         d = load(); e = d["play"].setdefault(str(place), {"secs": 0, "launches": 0, "last": 0, "longest": 0})
         e["secs"] += s; e["longest"] = max(e.get("longest", 0), s)
         k = time.strftime("%Y-%m-%d"); d["daily"][k] = d["daily"].get(k, 0) + s
         for old in sorted(d["daily"])[:-400]: d["daily"].pop(old, None)
         store(d)
+
+def capture_server(place, ts, p):
+    """After a plain Play, ask Roblox which server we ended up in (own presence 'gameId') and store it on that history entry, so 'Rejoin last server' works."""
+    u = load().get("user")
+    if not u or not load().get("cookie"): return
+    got, n = None, 0
+    while p.poll() is None and n < 600:
+        time.sleep(6 if n < 20 else 20); n += 1
+        try: x = (req("https://presence.roblox.com/v1/presence/users", {"userIds": [u["id"]]}).get("userPresences") or [{}])[0]
+        except Exception: continue
+        job = x.get("gameId")
+        if x.get("userPresenceType") == 2 and job and str(place) in (str(x.get("rootPlaceId")), str(x.get("placeId"))) and job != got:
+            got = job
+            with lock:
+                d = load()
+                for h in d["history"]:
+                    if abs(h.get("ts", 0) - ts) < 1e-6: h["job"] = job; break
+                store(d)
 
 def launch(a):
     """Start Sober, optionally straight into a place / server / private-server link code, and record it in history and playtime stats."""
@@ -686,19 +797,21 @@ def launch(a):
         if job: u += "&gameInstanceId=" + urllib.parse.quote(str(job))
         if code: u += "&linkCode=" + urllib.parse.quote(str(code))
         cmd.append(u)
+    col = col_enter() if place else False
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     if place:
         now = time.time(); name, icon = a.get("name") or "", a.get("icon") or ""
         with lock:
             d = load()
-            d["history"] = ([{"place": int(place), "name": name, "icon": icon, "job": job, "ts": now}] + d["history"])[:500]
+            d["history"] = ([{"place": int(place), "name": name, "icon": icon, "job": job, "code": code, "ts": now}] + d["history"])[:500]
             e = d["play"].setdefault(str(place), {"secs": 0, "launches": 0, "last": 0, "longest": 0})
             e.update(launches=e["launches"] + 1, last=now)
             if name: e["name"] = name
             if icon: e["icon"] = icon
             store(d)
         ACTIVE[str(place)] = {"name": name or str(place), "t0": now}
-        threading.Thread(target=track, args=(place, now, p, name), daemon=True).start()
+        threading.Thread(target=track, args=(place, now, p, name, col), daemon=True).start()
+        if not job and not code: threading.Thread(target=capture_server, args=(place, now, p), daemon=True).start()
         if not (name and icon):
             def fixup():
                 try: heal([place])
@@ -913,7 +1026,7 @@ def mods_dir(_a):
 R = {"state": state, "lastplayed": lastplayed, "open": open_url, "rbx": rbx, "me": me, "game": lambda a: ginfo(a["place"]), "search": search, "servers": servers,
      "user": user, "connect": connect, "ql_start": ql_start, "ql_poll": ql_poll, "ql_cancel": ql_cancel,
      "upd_status": upd_status, "upd_check": upd_check, "upd_ack": upd_ack, "upd_restart": upd_restart, "disconnect": disconnect, "friends": friends, "frequests": frequests, "discover": discover, "capi_test": capi_test, "launch": launch,
-     "active": active, "heal": lambda a: heal(a["places"]), "hist_del": hist_del, "sober": sober, "sober_set": sober_set, "sober_update": sober_update,
+     "active": active, "dnotify": dnotify, "focus": lambda a: {"ok": focus_hub()}, "heal": lambda a: heal(a["places"]), "hist_del": hist_del, "sober": sober, "sober_set": sober_set, "sober_update": sober_update,
      "sober_kill": sober_kill, "sober_dir": sober_dir, "save": save, "clear": clear, "import": imp,
      "mods_list": mods_list, "mods_put": mods_put, "mods_del": mods_del, "mods_dir": mods_dir}
 
@@ -986,6 +1099,19 @@ table{width:100%;border-collapse:collapse}td{padding:7px;border-bottom:1px solid
 #dlg input{width:100%;margin-bottom:14px}#dlg .acts{display:flex;justify-content:flex-end;gap:6px}#dlg .btn{margin:0}
 .btn.danger{background:#e5484d}@keyframes dlgin{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
 #toast{position:fixed;bottom:20px;right:20px;background:var(--accent);padding:10px 18px;border-radius:var(--radius);display:none;z-index:99;max-width:380px}
+#nts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:120;width:min(370px,92vw);pointer-events:none}
+.nt{pointer-events:auto;position:relative;overflow:hidden;display:flex;align-items:center;gap:12px;padding:12px 12px 15px;background:linear-gradient(120deg,var(--panel),color-mix(in srgb,var(--accent) 24%,var(--panel)));border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);border-radius:14px;box-shadow:0 14px 40px #000a,0 0 24px color-mix(in srgb,var(--accent) 30%,transparent);cursor:pointer;animation:ntin .45s cubic-bezier(.2,1.2,.3,1)}
+.nt.out{animation:ntout .3s ease-in forwards}@keyframes ntin{from{opacity:0;transform:translateX(70px) scale(.92)}to{opacity:1;transform:none}}@keyframes ntout{to{opacity:0;transform:translateX(70px) scale(.95)}}
+.ntav{position:relative;flex:none;width:54px}.ntav img{width:54px;height:54px;border-radius:50%;background:#0004;display:block}.nt.play .ntav img{box-shadow:0 0 0 2px var(--green),0 0 16px var(--green);animation:ntp 1.6s ease-in-out 3}@keyframes ntp{50%{box-shadow:0 0 0 3px var(--green),0 0 28px var(--green)}}
+.ntx{flex:1;min-width:0;display:flex;flex-direction:column}.ntx b{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ntx span{font-size:13px}.ntx small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.ntg{width:44px;height:44px;border-radius:10px;flex:none;object-fit:cover}.nta{display:flex;flex-direction:column;gap:4px}
+.ntbar{position:absolute;left:0;bottom:0;height:3px;width:100%;background:var(--green);transform-origin:left;animation:ntb var(--d,9s) linear forwards}.nt:hover .ntbar{animation-play-state:paused}@keyframes ntb{to{transform:scaleX(0)}}
+.avx{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}.avl{width:300px;flex:none;text-align:center;position:sticky;top:0}.avr{flex:1;min-width:340px}
+#bwrap{position:relative;border-radius:var(--radius);background:radial-gradient(circle at 50% 35%,color-mix(in srgb,var(--accent) 22%,transparent),transparent 70%);overflow:hidden}#bust{width:100%;min-height:280px;display:block;transition:opacity .25s}
+#bwrap.busy #bust{opacity:.35}#bwrap.busy::after{content:"";position:absolute;left:50%;top:50%;width:34px;height:34px;margin:-17px;border:4px solid #fff3;border-top-color:var(--green);border-radius:50%;animation:avs .8s linear infinite}@keyframes avs{to{transform:rotate(360deg)}}
+.chip{padding:6px 14px;border-radius:99px;background:#ffffff12;cursor:pointer;font-size:13px;user-select:none}.chip:hover{background:#ffffff24}.chip.on{background:var(--accent);color:#fff}.btn.sel{outline:2px solid var(--green)}
+.tile{position:relative;transition:transform .12s}.tile:hover{transform:translateY(-2px)}.tile.on{outline:2px solid var(--green)}.tile.on::after{content:"✓";position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:50%;background:var(--green);color:#fff;font-size:13px;line-height:22px;text-align:center}
+.avw{flex-wrap:nowrap;overflow-x:auto}.avw .tile{width:96px;flex:none}
 .av{width:72px;height:72px;border-radius:50%}
 .hero{background:linear-gradient(90deg,var(--panel),color-mix(in srgb,var(--accent) 22%,transparent))}.hero img{width:96px;height:96px;border-radius:var(--radius)}details{padding:6px 0;border-bottom:1px solid #ffffff10}summary{cursor:pointer}
 .chart{display:flex;align-items:flex-end;gap:6px;height:130px}.chart div{flex:1;text-align:center}.chart i{display:block;background:var(--green);border-radius:4px 4px 0 0;min-height:2px}.chart small{font-size:10px}
@@ -1026,10 +1152,11 @@ const askText=(msg,def,o)=>dlg({msg,input:1,def,ok:'Create',...o});
 const dl=(n,t,m)=>{const a=document.createElement('a');a.href='data:'+(m||'text/plain')+';charset=utf-8,'+encodeURIComponent(t);a.download=n;a.click()};
 const greet=()=>{const h=new Date().getHours();return h<5?'Night owl mode':h<12?'Good morning':h<18?'Good afternoon':'Good evening'};
 const hist=()=>{const m=new Map();S.history.forEach(x=>{if(!m.has(x.place))m.set(x.place,x)});return [...m.values()]};
+const lastSrv=p=>S.history.find(x=>x.place==p&&(x.job||x.code));
 const nameOf=p=>{const x=S.play[p]||S.favs.find(f=>f.place==p)||S.history.find(f=>f.place==p)||{};return x.name||String(p)};
 function parseLink(s){s=String(s||'').trim();if(!s)return null;const m=s.match(/\/games\/(\d+)/)||s.match(/placeId=(\d+)/i)||s.match(/^(\d{5,})$/);if(!m)return null;
  const c=s.match(/privateServerLinkCode=([\w-]+)/i)||s.match(/linkCode=([\w-]+)/i),j=s.match(/gameInstanceId=([\w-]+)/i);return{place:m[1],code:c&&c[1],job:j&&j[1]}}
-const TABS={home:'🏠 Home',games:'🎮 Discover',library:'📚 Library',privs:'🔒 Private Servers',friends:'👥 Friends',chat:'💬 Chats',avatar:'🧍 Avatar',shop:'🛒 Catalog',inbox:'✉️ Messages',groups:'🏘 Communities',profile:'🙂 Profile',history:'🕘 History',stats:'📊 Time Played',rset:'🔧 Roblox Settings',sober:'⚙️ Sober Settings',tweaks:'🧩 Tweaks & Mods',hub:'🧰 Hub Settings',style:'🎨 Style & CSS',data:'💾 Data',account:'🔗 Hub Login'};
+const TABS={home:'🏠 Home',games:'🎮 Discover',library:'📚 Library',privs:'🔒 Private Servers',friends:'👥 Friends',chat:'💬 Chats',avatar:'🧍 Avatar',shop:'🛒 Catalog ↗',inbox:'✉️ Messages',groups:'🏘 Communities',profile:'🙂 Profile',history:'🕘 History',stats:'📊 Time Played',rset:'🔧 Roblox Settings',sober:'⚙️ Sober Settings',tweaks:'🧩 Tweaks & Mods',hub:'🧰 Hub Settings',style:'🎨 Style & CSS',data:'💾 Data',account:'🔗 Hub Login'};
 const PRESETS={'Roblox Dark':['#18191d','#232527','#335fff','#f7f7f8','#00b06f'],'Roblox Light':['#e4e6ea','#ffffff','#335fff','#1b1e2b','#00b06f'],Amoled:['#000000','#0c0c0c','#00e5a0','#ffffff','#00e5a0'],Rose:['#1a1016','#26171f','#ff6b9d','#ffe8f0','#ff6b9d'],Sunset:['#1a1210','#271a16','#ff8a3d','#fff0e6','#ff8a3d'],Ocean:['#0b1620','#12212f','#2f9bff','#e6f3ff','#19c3a6'],Forest:['#101712','#17221a','#4caf50','#e8f5e9','#8bc34a'],Purple:['#150f1f','#20172e','#9b59ff','#f1e8ff','#c77dff'],Mono:['#111111','#1b1b1b','#888888','#eeeeee','#aaaaaa']};
 const TEMPLATE=`/* ===== Sober Hub CSS template — edit & press Apply ===== */
 :root{
@@ -1058,29 +1185,53 @@ async function load(){S=await api('state');apply();
  $('nav').innerHTML=Object.entries(TABS).map(([k,v])=>`<a data-t=${k} class="${k==tab?'on':''}" onclick="go('${k}')">${v}</a>`).join('')+`<a class=so onclick="openSober()">🚀 Open Sober</a>`;
  badge();
  if(tab!='game'){$('#main').innerHTML=await PAGES[tab]();AFTER[tab]&&AFTER[tab]()}}
-const go=t=>{tab=t;load()};
+const go=t=>{if(t=='shop'){open_('https://www.roblox.com/catalog');return}tab=t;load()};
 const openSober=()=>api('launch',{}).then(r=>toast(r.error||'Opening Sober…'));
 const save=async(p,q)=>{await api('save',p);S=await api('state');apply();if(!q)toast('Saved')};
 async function badge(){if(!S.connected)return;const r=await rb('https://friends.roblox.com/v1/user/friend-requests/count'),n=r&&r.count,a=document.querySelector('nav a[data-t=friends]');if(a&&n)a.innerHTML=TABS.friends+` <span class=badge>${n}</span>`;
  const m=await rb(CHAT+'get-conversation-metadata'),u=m&&m.global_unread_count,c=document.querySelector('nav a[data-t=chat]');if(c&&u)c.innerHTML=TABS.chat+` <span class=badge>${u}</span>`}
 async function chatWatch(){if(!S.connected)return;const m=await rb(CHAT+'get-conversation-metadata'),n=m&&m.global_unread_message_count;if(n==null)return;if(CUN>=0&&n>CUN&&tab!='chat')notify('New Roblox message',n-CUN+' unread — open Chats');CUN=n}
 function notify(t,b){toast(b?t+' — '+b:t,6000);try{if('Notification' in window&&Notification.permission=='granted')new Notification(t,{body:b||''})}catch(e){}}
+let NG={};
+async function gIcon(p){if(!p)return'';if(NG[p]!==undefined)return NG[p];NG[p]='';try{const r=await rb(`https://thumbnails.roblox.com/v1/places/gameicons?placeIds=${p}&returnPolicy=PlaceHolder&size=150x150&format=Png`);NG[p]=(r.data&&r.data[0]&&r.data[0].imageUrl)||''}catch(e){}return NG[p]}
+function chime(up){try{const A=chime.c||(chime.c=new(window.AudioContext||window.webkitAudioContext)());A.resume&&A.resume();const t=A.currentTime;[[660,0],[880,.11],[up?1175:990,.22]].forEach(([f,d])=>{const o=A.createOscillator(),g=A.createGain();o.type='sine';o.frequency.value=f;g.gain.setValueAtTime(0,t+d);g.gain.linearRampToValueAtTime(.12,t+d+.02);g.gain.exponentialRampToValueAtTime(.0001,t+d+.35);o.connect(g);g.connect(A.destination);o.start(t+d);o.stop(t+d+.4)})}catch(e){}}
+// Immersive friend notification: animated card (avatar, game icon, Join), a chime, and a real desktop notification when the hub is not in front.
+async function fnote(f,kind){
+ const o=S.opts||{},play=kind=='play',gi=play?await gIcon(f.place):'',gname=f.where||'a game';
+ if(o.nsound!='0')chime(play);
+ let host=$('#nts');if(!host){host=document.createElement('div');host.id='nts';document.body.appendChild(host)}
+ while(host.children.length>=4)host.firstChild.remove();
+ const el=document.createElement('div');el.className='nt '+(play?'play':'online');
+ el.innerHTML=`<div class=ntav><img src="${esc(f.avatar||'')}"><span class="dot s${f.status}"></span></div><div class=ntx><b>${esc(f.display)}</b><span>${play?'is playing <i>'+esc(gname)+'</i>':'just came online'}</span><small>${play?'Click to view · Join to hop in':'Click to view profile'}</small></div>${gi?`<img class=ntg src="${esc(gi)}">`:''}<div class=nta>${play&&f.place?'<button class="btn sm" data-j>▶ Join</button>':''}<button class="btn alt sm" data-x>✕</button></div><i class=ntbar></i>`;
+ const close=()=>{el.classList.add('out');setTimeout(()=>el.remove(),320)};
+ el.onclick=e=>{if(e.target.closest('[data-x]'))return close();if(e.target.closest('[data-j]')){joinFriend(f.id);return close()}showFriend(f.id);close()};
+ host.appendChild(el);setTimeout(close,9000);
+ if(o.ndesk!='0'&&(document.hidden||!document.hasFocus())){
+  const title=play?f.display+' is playing':f.display+' came online',body=play?gname:'',r=await api('dnotify',{title,body,icon:f.avatar||''});
+  if(!r.ok){try{if('Notification' in window&&Notification.permission=='granted')new Notification(title,{body,icon:f.avatar||undefined})}catch(e){}}}}
+const ntest=()=>{const u=S.user||{};fnote({id:u.id||0,display:'Test Friend',avatar:u.avatar||'',status:2,place:null,where:'Notifications work!'},'play')};
+const setOpt=(k,v)=>save({opts:{[k]:v}},1);
+let HADACT=false;
 async function pollActive(){const r=await api('active');ACT=Array.isArray(r)?r:[];const e=$('#act');if(e)e.outerHTML=actHTML();
- }
+ if(HADACT&&!ACT.length){try{window.focus()}catch(x){}api('focus',{});toast('Welcome back to Sober Hub',4000);load()}HADACT=ACT.length>0}
 function setTitle(l){const n=l.filter(f=>f.status==2).length;document.title=(n?`(${n}) `:'')+'Sober Hub'}
-async function watch(){if(!S.connected||!S.opts||S.opts.notify=='off')return;const l=await api('friends');if(!Array.isArray(l))return;setTitle(l);
- if(PREV){const pn=new Set(S.pinned||[]);l.forEach(f=>{const o=PREV[f.id];if(o==null||o==f.status)return;if(S.opts.notify=='pinned'&&!pn.has(f.id))return;
-  if(f.status==2)notify(f.display+' is playing',f.where||'a game');else if(f.status==1&&o==0&&S.opts.notify=='all')notify(f.display+' came online')})}
- PREV={};l.forEach(f=>PREV[f.id]=f.status)}
+async function watch(){if(!S.connected||!S.opts||S.opts.notify=='off')return;const l=await api('friends');if(!Array.isArray(l)||!l.length)return;setTitle(l);
+ const pn=new Set(S.pinned||[]),mode=S.opts.notify,np={};l.forEach(f=>np[f.id]={s:f.status,p:f.place});
+ // presence sometimes fails for a whole batch and everybody looks offline: ignore that poll instead of announcing a flood of "came online"
+ if(PREV){const was=Object.values(PREV).filter(x=>x.s>0).length,now=l.filter(f=>f.status>0).length;if(was>3&&now==0)return}
+ if(PREV)for(const f of l){const o=PREV[f.id];if(!o)continue;if(mode=='pinned'&&!pn.has(f.id))continue;
+  if(f.status==2&&(o.s!=2||o.p!=f.place))await fnote(f,'play');
+  else if(f.status==1&&o.s==0&&S.opts.nonline!='0')await fnote(f,'online')}
+ PREV=np}
 const tile=(g,sub)=>(GM[g.place]=g,`<div class=tile onclick="openGame(${g.place})" oncontextmenu="gameMenu(event,${g.place})"><img loading=lazy src="${esc(g.icon||'')}" onerror="this.style.opacity=.2"><b>${esc(g.name||g.place)}</b><small>${sub||''}</small></div>`);
 const dtile=g=>tile(g,`${g.like!=null?'👍 '+g.like+'% · ':''}👤 ${(g.playing||0).toLocaleString()}`);
 function setFriends(l){const pn=new Set(S.pinned||[]);l.sort((a,b)=>(pn.has(b.id)-pn.has(a.id))||((ORD[a.status]??3)-(ORD[b.status]??3)));FR=l;setTitle(l);return l}
 const frs=l=>l.map(f=>`<div class=fr onclick="showFriend(${f.id})" oncontextmenu="friendMenu(event,${f.id})"><div class=ava><img src="${esc(f.avatar||'')}"><span class="dot s${f.status}"></span></div><b>${(S.pinned||[]).includes(f.id)?'⭐ ':''}${esc(f.display)}</b><small>${f.status==2?esc(f.where||'In game'):f.status==1?'Online':''}</small></div>`).join('')||'<small>No friends found</small>';
 async function play(place,name,icon,job,code){const r=await api('launch',{place,name,icon,job,code});toast(r.error?r.error:'Launching in Sober…');setTimeout(load,900);setTimeout(pollActive,2500)}
-function pl(place,job){const g=cur&&cur.place==place?cur:(S.favs.find(f=>f.place==place)||S.history.find(f=>f.place==place)||{});play(place,g.name||'',g.icon||'',job)}
+function pl(place,job,code){const g=cur&&cur.place==place?cur:(S.favs.find(f=>f.place==place)||S.history.find(f=>f.place==place)||{});play(place,g.name||'',g.icon||'',job||null,code||null)}
 function joinFriend(id){const f=FR.find(x=>x.id==id);if(!f)return;if(f.status==2&&f.place){play(f.place,f.where||'',null,f.job)}else toast(f.status==2?'Game not joinable':'Friend is not in a game')}
-function heroHTML(g,label){LP=g;const l=S.history.find(x=>x.place==g.place&&x.job),p2=S.play[g.place];
- return `<div class="card hero"><div class=row style="gap:16px"><img src="${esc(g.icon||'')}" onerror="this.style.opacity=.2"><div style="flex:1;min-width:200px"><small>${esc(label)}</small><h2 style="margin:0">${esc(g.name||g.place)}</h2><small>${g.playing!=null?'👤 '+g.playing.toLocaleString()+' playing now · ':''}${p2?fmt(p2.secs)+' played via Sober Hub':'Not played via Sober Hub yet'}</small></div><button class="btn play" onclick="play(LP.place,LP.name,LP.icon)">▶ Play in Sober</button>${l?`<button class="btn alt" onclick="pl(${g.place},'${esc(l.job)}')">↩ Last server</button>`:''}<button class="btn alt" onclick="openGame(${g.place})">Details</button></div></div>`}
+function heroHTML(g,label){LP=g;const l=lastSrv(g.place),p2=S.play[g.place];
+ return `<div class="card hero"><div class=row style="gap:16px"><img src="${esc(g.icon||'')}" onerror="this.style.opacity=.2"><div style="flex:1;min-width:200px"><small>${esc(label)}</small><h2 style="margin:0">${esc(g.name||g.place)}</h2><small>${g.playing!=null?'👤 '+g.playing.toLocaleString()+' playing now · ':''}${p2?fmt(p2.secs)+' played via Sober Hub':'Not played via Sober Hub yet'}</small></div><button class="btn play" onclick="play(LP.place,LP.name,LP.icon)">▶ Play in Sober</button>${l?`<button class="btn alt" onclick="pl(${g.place},'${esc(l.job||'')}','${esc(l.code||'')}')">↩ Last server</button>`:''}<button class="btn alt" onclick="openGame(${g.place})">Details</button></div></div>`}
 const contHTML=()=>{const h=hist(),seen=new Set(h.map(x=>String(x.place))),ex=RC.filter(g=>!seen.has(String(g.place))&&!hidSet().has(String(g.place)));
  const all=[...h.slice(0,20).map(g=>tile(g,ago(g.ts))),...ex.map(g=>tile(g,'On your Roblox account'))];return all.length?`<h3>Continue</h3><div class=rs>${all.join('')}</div>`:''};
 function refreshHome(){const hd=$('#hero');if(!hd)return;const h=hist(),useR=RC[0]&&(S.opts.hero=='roblox'||!h.length);
@@ -1089,11 +1240,11 @@ async function healMissing(){const need=[...S.history.slice(0,60),...S.favs].fil
  need.forEach(p=>HEALED.add(p));await api('heal',{places:[...new Set(need)].slice(0,100)});S=await api('state');if(tab=='home'){refreshHome();const f=$('#fav');f&&(f.innerHTML=S.favs.map(g=>tile(g)).join(''))}}
 // Page registry: PAGES[tab]() returns the page's HTML, then AFTER[tab]() (below) fills in anything that loads asynchronously.
 const PAGES={
-home(){const h=hist(),lj=h[0]&&S.history.find(x=>x.place==h[0].place&&x.job),pl0=Object.values(S.play),tot=pl0.reduce((a,b)=>a+b.secs,0);
+home(){const h=hist(),lj=h[0]&&lastSrv(h[0].place),pl0=Object.values(S.play),tot=pl0.reduce((a,b)=>a+b.secs,0);
  return `<h2>${greet()}${S.user?', '+esc(S.user.display):''}</h2><div id=hero></div>
  <div class=card><span class=stat><b>${fmt(todaySecs())}</b>today</span><span class=stat><b>${fmt(tot)}</b>total</span><span class=stat><b>${pl0.reduce((a,b)=>a+b.launches,0)}</b>launches</span><span class=stat><b>${S.favs.length}</b>favorites</span><span class=stat><b id=fo>${S.connected?'…':'—'}</b>friends in game</span></div>
  ${S.connected?'<h3 style="margin-top:0">Friends</h3><div id=fr class=rs>Loading…</div>':`<div class=card>🔗 <b>Connect your Roblox account</b> to see friends, who's in-game, join them, and your Robux. <button class=btn onclick="go('home');go('account')">Connect</button></div>`}
- <div class=row>${lj?`<button class="btn alt" onclick="pl(${lj.place},'${esc(lj.job)}')">↩ Rejoin last server</button>`:''}${S.favs.length?`<button class="btn alt" onclick="rnd()">🎲 Random favorite</button>`:''}<button class="btn alt" onclick="cmdk()">⌨ Quick jump (Ctrl+K)</button></div>
+ <div class=row>${lj?`<button class="btn alt" onclick="pl(${lj.place},'${esc(lj.job||'')}','${esc(lj.code||'')}')">↩ Rejoin last server</button>`:''}${S.favs.length?`<button class="btn alt" onclick="rnd()">🎲 Random favorite</button>`:''}<button class="btn alt" onclick="cmdk()">⌨ Quick jump (Ctrl+K)</button></div>
  <div id=cont></div>${S.favs.length?`<h3>Favorites</h3><div id=fav class=rs>${S.favs.map(g=>tile(g)).join('')}</div>`:''}<div id=disc><small>Loading recommendations…</small></div>`},
 friends(){return S.connected?`<h2>Friends <small id=fsum style="display:inline"></small></h2>
  <small style="margin:0 0 10px">You can only add trusted friends from <a style="cursor:pointer;color:var(--accent)" onclick="open_('https://www.roblox.com/users/friends#!/friend-requests')">https://www.roblox.com/users/friends#!/friend-requests</a></small>
@@ -1139,7 +1290,9 @@ hub(){const o=S.opts;return `<h2>Hub settings</h2>
   <div class=row style="margin-top:8px"><input id=cap placeholder="Path to list (optional), e.g. data.games" value="${esc((S.capi||{}).path||'')}" style="flex:1;min-width:220px"><button class=btn onclick="capiSave()">Save</button><button class="btn alt" onclick="capiTest()">Save &amp; test</button></div>
   <small id=capir></small></details></div>
  <div class=card><b>Home hero (top game)</b><small>Which game is shown at the top of Home.</small><select onchange="save({opts:{hero:this.value}})"><option value=hub ${o.hero!='roblox'?'selected':''}>Last game I launched from Sober Hub</option><option value=roblox ${o.hero=='roblox'?'selected':''}>First game in my Roblox Continue list</option></select></div>
- <div class=card><b>Friend notifications</b><small>Desktop notification when friends start playing (checked every minute while the hub is open).</small><select onchange="setNotify(this.value)">${[['off','Off'],['pinned','Pinned friends only'],['all','All friends']].map(([v,l])=>`<option value=${v} ${o.notify==v?'selected':''}>${l}</option>`).join('')}</select></div>
+ <div class=card><b>Friend notifications</b><small>Animated pop-up cards when friends start playing or come online (checked every 30 seconds while the hub is open). Pinned = only friends you starred on the Friends page.</small><div class=row style="margin-top:8px"><select onchange="setNotify(this.value)">${[['off','Off'],['pinned','Pinned friends only'],['all','All friends']].map(([v,l])=>`<option value=${v} ${o.notify==v?'selected':''}>${l}</option>`).join('')}</select><button class="btn alt sm" onclick="ntest()">🔔 Test notification</button></div>
+  ${[['nonline','Also notify when they come online'],['nsound','Play a chime'],['ndesk','Desktop notification when the hub is in the background']].map(([k,l])=>`<label style="display:block;margin:6px 0"><input type=checkbox ${o[k]!='0'?'checked':''} onchange="setOpt('${k}',this.checked?'1':'0')"> ${l}</label>`).join('')}</div>
+ <div class=card><b>Games</b><label style="display:block;margin:6px 0"><input type=checkbox ${o.backhub!='0'?'checked':''} onchange="setOpt('backhub',this.checked?'1':'0')"> Return to Sober Hub when I leave a game <small style="display:inline">- Sober closes instead of showing its own home screen (only for games started from the hub; your own Sober setting is restored afterwards)</small></label></div>
  <div class=card><b>Updates</b><small>Sober Hub v${esc(S.version||'')} · checks GitHub on start and every 6 hours. A newer sober_hub.py in the repo is installed automatically (the old file is kept as sober_hub.py.bak).</small><label class=row style="margin:8px 0"><input type=checkbox ${o.autoupd!='0'?'checked':''} onchange="save({opts:{autoupd:this.checked?'1':'0'}})"> Update automatically</label><button class=btn onclick="updNow(this)">Check for updates now</button></div>
  ${hiddenCard()}<div class=card><b>Keyboard shortcuts</b><small><code>Ctrl+K</code> quick jump to tabs/games/links · <code>/</code> focus search · <code>Esc</code> close pop-ups</small></div>`},
 style(){return `<h2>Style & CSS</h2><div class=card><b>Presets</b><div class=row>${Object.keys(PRESETS).map(k=>`<button class="btn alt" onclick="preset('${k}')">${k}</button>`).join('')}</div>
@@ -1202,7 +1355,6 @@ let RQ=[];
 async function bulkReq(a){if(!RQ.length||!await ask((a[0]=='a'?'Accept':'Decline')+' all '+RQ.length+' requests?',{ok:a[0]=='a'?'Accept all':'Decline all',danger:a[0]!='a'}))return;let ok=0;for(const x of RQ){const r=await rb(`https://friends.roblox.com/v1/users/${x.id}/${a}`,{});if(!r.error)ok++;else if(/too many|flood|limit/i.test(r.error)){toast(r.error);break}await new Promise(r=>setTimeout(r,350))}toast(ok+' done');go('friends')}
 const fr=(id,a)=>guard(rb(`https://friends.roblox.com/v1/users/${id}/${a}`,{}),'Done').then(()=>load().then(()=>tab=='friends'&&AFTER.friends()));
 const unfriend=id=>ask('Remove this friend?',{ok:'Remove',danger:1}).then(y=>y&&fr(id,'unfriend'));
-const blockU=id=>ask('Block this user?',{ok:'Block',danger:1}).then(y=>y&&guard(rb(`https://accountsettings.roblox.com/v1/users/${id}/block`,{}),'Blocked'));
 let QLT=null;
 function qlStop(){clearInterval(QLT);QLT=null}
 async function qlStart(){const b=$('#qlbox');b.innerHTML='Asking Roblox for a code…';const r=await api('ql_start',{});if(r.error){b.innerHTML=`<small style="color:#e5484d">${esc(r.error)}</small><button class=btn onclick="qlStart()">Try again</button>`;return}
@@ -1234,7 +1386,7 @@ async function fav(g,on){const f=S.favs.filter(x=>x.place!=g.place);if(on)f.push
 async function favFirst(i){const f=[...S.favs],[x]=f.splice(i,1);f.unshift(x);await save({favs:f},1);go('library')}
 async function favDel(p){await fav({place:p},false);go('library')}
 function rHist(){const el=$('#hl');if(!el)return;const q=HQ.toLowerCase(),l=S.history.filter(h=>!q||String(h.name||h.place).toLowerCase().includes(q));
- el.innerHTML=`<table>${l.map(h=>`<tr><td><b>${esc(h.name||h.place)}</b></td><td>${ago(h.ts)}</td><td>${h.job?'🖥 '+esc(String(h.job).slice(0,8))+'…':'public'}</td><td style="text-align:right;white-space:nowrap"><button class="btn sm" onclick="pl(${h.place})">Play</button>${h.job?`<button class="btn alt sm" onclick="pl(${h.place},'${esc(h.job)}')">Same server</button>`:''}<button class="btn alt sm" onclick="histDel(${h.ts})">✕</button></td></tr>`).join('')||'<tr><td>Nothing yet</td></tr>'}</table>`}
+ el.innerHTML=`<table>${l.map(h=>`<tr><td><b>${esc(h.name||h.place)}</b></td><td>${ago(h.ts)}</td><td>${h.job?'🖥 '+esc(String(h.job).slice(0,8))+'…':h.code?'🔒 private':'public'}</td><td style="text-align:right;white-space:nowrap"><button class="btn sm" onclick="pl(${h.place})">Play</button>${h.job||h.code?`<button class="btn alt sm" onclick="pl(${h.place},'${esc(h.job||'')}','${esc(h.code||'')}')">Same server</button>`:''}<button class="btn alt sm" onclick="histDel(${h.ts})">✕</button></td></tr>`).join('')||'<tr><td>Nothing yet</td></tr>'}</table>`}
 async function histDel(ts){await api('hist_del',{ts});S=await api('state');rHist()}
 async function newColl(){const n=(await askText('Collection name','',{title:'New collection'})||'').trim();if(!n)return;const C=JSON.parse(JSON.stringify(S.collections||{}));C[n]=C[n]||[];await save({collections:C},1);go('library')}
 async function delColl(ci){const C=JSON.parse(JSON.stringify(S.collections||{})),n=Object.keys(C)[ci];if(!await ask('Delete collection "'+n+'"?',{ok:'Delete',danger:1}))return;delete C[n];await save({collections:C},1);go('library')}
@@ -1242,10 +1394,10 @@ async function rmColl(ci,gi){const C=JSON.parse(JSON.stringify(S.collections||{}
 async function addToColl(v){if(v==='')return;const C=JSON.parse(JSON.stringify(S.collections||{}));let n;if(v=='new'){n=(await askText('Collection name','',{title:'New collection'})||'').trim();if(!n)return}else n=Object.keys(C)[+v];
  C[n]=C[n]||[];if(!C[n].some(x=>x.place==cur.place))C[n].push({place:cur.place,name:cur.name,icon:cur.icon});await save({collections:C});openGame(cur.place)}
 async function openGame(p,focus){if(tab!='game')PT=tab;tab='game';document.querySelectorAll('nav a.on').forEach(a=>a.classList.remove('on'));$('#main').innerHTML='Loading…';const g=await api('game',{place:p});if(g.error){$('#main').innerHTML=esc(g.error);return}cur=g;
- const pl2=S.play[p]||{},h=S.history.find(x=>x.place==p&&x.job),isF=S.favs.some(f=>f.place==p),C=S.collections||{},fp=FR.filter(f=>f.status==2&&String(f.place)==String(p));
+ const pl2=S.play[p]||{},h=lastSrv(p),isF=S.favs.some(f=>f.place==p),C=S.collections||{},fp=FR.filter(f=>f.status==2&&String(f.place)==String(p));
  $('#main').innerHTML=`<a class="btn alt" onclick="go(PT||'games')">← Back</a><div class=card><div class=row style="align-items:flex-start;gap:20px"><img src="${esc(g.icon)}" style="width:200px;border-radius:var(--radius)"><div style="flex:1;min-width:260px"><h2 style="margin:0">${esc(g.name)}</h2><small>By ${esc(g.creator)} · updated ${g.updated} · max ${g.maxp} players</small>
  <p><span class=stat><b>${g.like!=null?'👍 '+g.like+'%':'—'}</b>rating</span><span class=stat><b>${g.playing.toLocaleString()}</b>playing</span><span class=stat><b>${g.visits.toLocaleString()}</b>visits</span><span class=stat><b>${g.favs.toLocaleString()}</b>favorites</span></p>
- <button class="btn play" onclick="pl(${p})">▶ Play</button>${h?`<button class=btn onclick="pl(${p},'${esc(h.job)}')">↩ Last server</button>`:''}<button class="btn alt" onclick="fav(cur,${!isF}).then(()=>openGame(${p}))">${isF?'★ Favorited':'☆ Favorite'}</button>${S.connected?'<button class="btn alt" onclick="vote(true)">👍</button><button class="btn alt" onclick="vote(false)">👎</button><button class="btn alt" onclick="rfav()">❤ Favorite on Roblox</button>':''}
+ <button class="btn play" onclick="pl(${p})">▶ Play</button>${h?`<button class=btn onclick="pl(${p},'${esc(h.job||'')}','${esc(h.code||'')}')">↩ Last server</button>`:''}<button class="btn alt" onclick="fav(cur,${!isF}).then(()=>openGame(${p}))">${isF?'★ Favorited':'☆ Favorite'}</button>${S.connected?'<button class="btn alt" onclick="vote(true)">👍</button><button class="btn alt" onclick="vote(false)">👎</button><button class="btn alt" onclick="rfav()">❤ Favorite on Roblox</button>':''}
  <div class=row style="margin-top:6px"><select onchange="addToColl(this.value)"><option value="">＋ Add to collection…</option>${Object.keys(C).map((n,i)=>`<option value=${i}>${esc(n)}</option>`).join('')}<option value=new>New collection…</option></select><button class="btn alt sm" onclick="copy('https://www.roblox.com/games/${p}')">Copy link</button><button class="btn alt sm" onclick="copy('roblox://experiences/start?placeId=${p}')">Copy launch link</button><button class="btn alt sm" onclick="open_('https://www.roblox.com/games/${p}')">Open on roblox.com</button></div></div></div>
  <p>${esc(g.desc)}</p><span class=stat><b>${fmt(pl2.secs||0)}</b>your time</span><span class=stat><b>${pl2.launches||0}</b>launches</span><span class=stat><b>${ago(pl2.last)}</b>last played</span></div>
  ${fp.length?`<div class=card><b>Friends playing this (${fp.length})</b><div class=rs style="margin-top:8px">${fp.map(f=>`<div class=fr onclick="joinFriend(${f.id})"><div class=ava><img src="${esc(f.avatar||'')}"><span class="dot s2"></span></div><b>${esc(f.display)}</b><small>Click to join</small></div>`).join('')}</div></div>`:''}
@@ -1275,34 +1427,49 @@ async function randSrv(p){const r=await api('servers',{place:p});if(r.error||!r.
 async function soberUpd(b){b.disabled=true;toast('Updating Sober…',8000);const r=await api('sober_update',{});b.disabled=false;toast(r.error||(r.ok?'Sober is up to date':'Update failed: '+r.out),6000)}
 const ffDel=i=>api('sober_set',{fflag_del:[Object.keys(SOB)[i]]}).then(()=>go('sober'));
 function ffAdd(){const k=$('#ffk').value.trim();if(!k)return toast('Enter a flag name');api('sober_set',{fflags:{[k]:pv($('#ffv').value.trim())}}).then(()=>go('sober'))}
-async function setNotify(v){await save({opts:{notify:v}});PREV=null;if(v!='off'&&'Notification' in window&&Notification.permission=='default')Notification.requestPermission()}
+async function setNotify(v){await save({opts:{notify:v}});PREV=null;if(v!='off'){watch();if('Notification' in window&&Notification.permission=='default')Notification.requestPermission()}}
 // ---- avatar
 const SKIN=[[18,'#cc8e69'],[125,'#eab892'],[217,'#7c5c46'],[1,'#f2f3f3'],[226,'#fdea8d'],[194,'#a3a2a5'],[23,'#0d69ac'],[21,'#c4281c'],[26,'#1b2a35'],[24,'#f5cd30'],[105,'#e29b40'],[104,'#6b327c'],[119,'#a4bd47'],[1001,'#f8f8f8'],[1003,'#111111']];
 const WT=['Hat','HairAccessory','FaceAccessory','NeckAccessory','ShoulderAccessory','FrontAccessory','BackAccessory','WaistAccessory','TShirtAccessory','ShirtAccessory','PantsAccessory','JacketAccessory','SweaterAccessory','ShortsAccessory','LeftShoeAccessory','RightShoeAccessory','DressSkirtAccessory','EyebrowAccessory','EyelashAccessory','Shirt','Pants','TShirt','Face','Head','DynamicHead','Torso','LeftArm','RightArm','LeftLeg','RightLeg'];
-const EXCL=new Set(['Shirt','Pants','TShirt','Face','Head','DynamicHead','Torso','LeftArm','RightArm','LeftLeg','RightLeg']);
-let AV={},CAT=[],WC='',WL=[],WN=new Set(),OL=[];
+const EXCL=new Set(['IdleAnimation','WalkAnimation','RunAnimation','JumpAnimation','FallAnimation','ClimbAnimation','SwimAnimation','Shirt','Pants','TShirt','Face','Head','DynamicHead','Torso','LeftArm','RightArm','LeftLeg','RightLeg']);
+let AV={},CAT=[],WC='',WL=[],WN=new Set(),OL=[],AVV='avatar',AVCAT='Accessories',AVT='Hat',UNDO=null;
+const AVC={Clothing:['Shirt','Pants','TShirt','ShirtAccessory','PantsAccessory','JacketAccessory','SweaterAccessory','ShortsAccessory','TShirtAccessory','DressSkirtAccessory','LeftShoeAccessory','RightShoeAccessory'],Accessories:['Hat','HairAccessory','FaceAccessory','NeckAccessory','ShoulderAccessory','FrontAccessory','BackAccessory','WaistAccessory','EyebrowAccessory','EyelashAccessory'],Body:['Face','Head','DynamicHead','Torso','LeftArm','RightArm','LeftLeg','RightLeg'],Animations:['IdleAnimation','WalkAnimation','RunAnimation','JumpAnimation','FallAnimation','ClimbAnimation','SwimAnimation'],Outfits:[],Bundles:[]};
+const tname=t=>t.replace(/Accessory$/,'').replace(/([a-z])([A-Z])/g,'$1 $2');
+const avBusy=on=>{const w=$('#bwrap');if(w){w.classList.toggle('busy',!!on);clearTimeout(avBusy.t);if(on)avBusy.t=setTimeout(()=>avBusy(0),14000)}};
 const isAcc=t=>t=='Hat'||/Accessory$/.test(t||'');
 const atype=a=>(a.assetType&&a.assetType.name)||'';
 const avErr=e=>esc(e)+(/author|denied|token|login/i.test(e)?' - reconnect your account in Hub Login':'');
 const AVU='https://avatar.roblox.com/v1/';
 async function bust(n=0){const im=$('#bust');if(!im||!S.user)return;
- const r=await rb(`https://thumbnails.roblox.com/v1/users/avatar?userIds=${S.user.id}&size=420x420&format=Png`),d=r.data&&r.data[0];
- if(d&&d.imageUrl&&(d.state=='Completed'||n>=4))im.src=d.imageUrl;else if(n<5)setTimeout(()=>bust(n+1),1500)}
+ const r=await rb(`https://thumbnails.roblox.com/v1/users/${AVV}?userIds=${S.user.id}&size=420x420&format=Png`),d=r.data&&r.data[0];
+ if(d&&d.imageUrl&&(d.state=='Completed'||n>=6)){im.onload=im.onerror=()=>avBusy(0);im.src=d.imageUrl}else if(n<8)setTimeout(()=>bust(n+1),1500);else avBusy(0)}
+const avView=v=>{AVV=v;document.querySelectorAll('[data-v]').forEach(e=>e.classList.toggle('sel',e.dataset.v==v));avBusy(1);bust()};
 function avResult(r,ok){
- if(r.error){toast(r.error,5000);return false}
- if(r.success===false||(r.invalidAssetIds||[]).length){toast('Roblox rejected that: '+((r.invalidAssetIds||[]).join(', ')||'invalid combination'),5000);avLoad();return false}
- toast(ok);rb(AVU+'redraw-thumbnail',{});avLoad();setTimeout(bust,2500);return true}
+ if(r.error){avBusy(0);toast(r.error,5000);return false}
+ if(r.success===false||(r.invalidAssetIds||[]).length){avBusy(0);toast('Roblox rejected that: '+((r.invalidAssetIds||[]).join(', ')||'invalid combination'),5000);avLoad(1);return false}
+ toast(ok,2500);rb(AVU+'redraw-thumbnail',{});avLoad(1);setTimeout(bust,2500);return true}
 // Replace the worn assets. Tries the v2 endpoint (supports layered-clothing meta), then falls back to v1 asset ids.
-async function avSave(list,ok){
+async function avSave(list,ok,isUndo){
+ avBusy(1);if(!isUndo)UNDO=(AV.assets||[]).map(a=>a.meta?{id:a.id,meta:a.meta}:{id:a.id});
  let r=await rb('https://avatar.roblox.com/v2/avatar/set-wearing-assets',{assets:list.map(a=>a.meta?{id:a.id,meta:a.meta}:{id:a.id})});
  if(r.error||r.success===false){const r1=await rb(AVU+'avatar/set-wearing-assets',{assetIds:list.map(a=>a.id)});if(!(r1.error||r1.success===false)||!r.error)r=r1}
  return avResult(r,ok)}
-async function avLoad(){bust();
+const avUndo=()=>UNDO?avSave(UNDO,'Reverted',true):toast('Nothing to undo yet');
+const avMark=()=>document.querySelectorAll('#ward .tile[data-id]').forEach(e=>{const on=WN.has(+e.dataset.id);e.classList.toggle('on',on);const s=e.querySelector('small');if(s)s.textContent=on?'✓ Worn':'Wear'});
+function avChips(){const t=$('#avtabs');if(!t)return;t.innerHTML=Object.keys(AVC).map(k=>`<span class="chip${k==AVCAT?' on':''}" onclick="avCat('${k}')">${k}</span>`).join('');
+ const s=$('#avsub');if(s)s.innerHTML=(AVC[AVCAT]||[]).map(k=>`<span class="chip${k==AVT?' on':''}" onclick="avSub('${k}')">${tname(k)}</span>`).join('')}
+function avCat(c){AVCAT=c;AVT=AVC[c][0]||c;avChips();avTab()}
+function avSub(t){AVT=t;avChips();avTab()}
+function avTab(){const w=$('#ward'),m=$('#wmore');if(m)m.style.display='none';if($('#wq'))$('#wq').value='';
+ if(AVT=='Outfits'){w.innerHTML='<small>Loading…</small>';outfits()}else{w.innerHTML='<small>Loading…</small>';wardrobe(true)}}
+async function avLoad(keep){if(!keep)avBusy(1);bust();
  AV=await rb(AVU+'avatar');
  if(AV.error){$('#worn')&&($('#worn').innerHTML=avErr(AV.error));return}
  const A=AV.assets||[];WN=new Set(A.map(a=>a.id));const t=await th('assets','assetIds',A.map(a=>a.id));
  $('#worn')&&($('#worn').innerHTML=A.map(a=>`<div class=tile onclick="unwear(${a.id})" title="Click to take off"><img src="${esc(t[a.id]||'')}"><b>${esc(a.name)}</b><small>${esc(atype(a))} - click to remove</small></div>`).join('')||'<small>Nothing worn</small>');
- drawAvOpts();outfits();wardrobe(true)}
+ $('#avmeta')&&($('#avmeta').innerHTML=`<span class=pill>${esc(AV.playerAvatarType||'')}</span><span class=pill>${A.length} items worn</span>`);
+ if(keep){avMark();return}
+ drawAvOpts();avChips();avTab()}
 async function drawAvOpts(){const rules=await rb(AVU+'avatar-rules'),sc=rules.scales||{},cur=AV.scales||{},el=$('#avopt');if(!el)return;
  const defs={height:{min:.9,max:1.05,increment:.01},width:{min:.7,max:1,increment:.01},head:{min:.95,max:1,increment:.01},depth:{min:.7,max:1,increment:.01},proportion:{min:0,max:1,increment:.01},bodyType:{min:0,max:1,increment:.01}};
  el.innerHTML=`<div class=row>Avatar type <button class="btn${AV.playerAvatarType=='R6'?'':' alt'} sm" onclick="avType('R6')">R6</button><button class="btn${AV.playerAvatarType=='R15'?'':' alt'} sm" onclick="avType('R15')">R15</button></div><div style="margin-top:8px">${Object.keys(defs).map(k=>{const d={...defs[k],...(sc[k]||{})},v=cur[k]??d.max;return `<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><span style="width:84px">${k}</span><input type=range data-s=${k} min=${d.min} max=${d.max} step=${d.increment} value="${v}" oninput="this.nextElementSibling.textContent=this.value" style="flex:1;padding:0"><span style="width:38px">${v}</span></label>`}).join('')}<button class=btn onclick="applyScales()">Apply scales</button></div>`}
@@ -1341,13 +1508,13 @@ async function wardBundles(reset){
  if(reset)$('#ward').innerHTML=html||'<small>No bundles owned</small>';else $('#ward').insertAdjacentHTML('beforeend',html);
  const m=$('#wmore');m&&(m.style.display=WC?'inline-block':'none');wfilter()}
 async function avType(t){avResult(await rb(AVU+'avatar/set-player-avatar-type',{playerAvatarType:t}),'Switched to '+t)}
-async function wardrobe(reset=true){if(reset){WC='';WL=[]}const t=$('#wt')&&$('#wt').value;if(!t)return;if(t=='Bundles')return wardBundles(reset);
+async function wardrobe(reset=true){if(reset){WC='';WL=[]}const t=AVT;if(!t)return;if(t=='Bundles')return wardBundles(reset);if(t=='Outfits')return;
  const r=await rb(`https://inventory.roblox.com/v2/users/${S.user.id}/inventory?assetTypes=${t}&limit=50&sortOrder=Desc${WC?'&cursor='+encodeURIComponent(WC):''}`);
  if(r.error){$('#ward').innerHTML=avErr(r.error);return}
  const l=r.data||[],base=WL.length;WC=r.nextPageCursor||'';WL=WL.concat(l.map(x=>({id:x.assetId,name:x.assetName,type:t})));
  const im=await th('assets','assetIds',l.map(x=>x.assetId));
- const html=l.map((x,i)=>{const on=WN.has(x.assetId);return `<div class=tile onclick="wearI(${base+i})" style="${on?'outline:2px solid var(--green)':''}"><img src="${esc(im[x.assetId]||'')}"><b>${esc(x.assetName)}</b><small>${on?'Worn - click to remove':'Click to wear'}</small></div>`}).join('');
- if(reset)$('#ward').innerHTML=html||'<small>Nothing here</small>';else $('#ward').insertAdjacentHTML('beforeend',html);
+ const html=l.map((x,i)=>{const on=WN.has(x.assetId);return `<div class="tile${on?' on':''}" data-id="${x.assetId}" onclick="wearI(${base+i})"><img src="${esc(im[x.assetId]||'')}"><b>${esc(x.assetName)}</b><small>${on?'✓ Worn':'Wear'}</small></div>`}).join('');
+ if(reset)$('#ward').innerHTML=html||'<small>You do not own anything in this category</small>';else $('#ward').insertAdjacentHTML('beforeend',html);
  const m=$('#wmore');m&&(m.style.display=WC?'inline-block':'none');wfilter()}
 const wfilter=()=>{const q=($('#wq')&&$('#wq').value||'').toLowerCase();document.querySelectorAll('#ward .tile').forEach(e=>e.style.display=e.textContent.toLowerCase().includes(q)?'':'none')};
 const wearI=i=>{const x=WL[i];x&&wear(x.id,x.type,x.name)};
@@ -1359,10 +1526,10 @@ async function wear(id,type,nm){if(WN.has(id))return unwear(id);
  return avSave([...keep,{id}],(nm||'Item')+' worn')}
 const unwear=id=>avSave((AV.assets||[]).filter(a=>a.id!=id),'Taken off');
 const unwearAcc=()=>avSave((AV.assets||[]).filter(a=>!isAcc(atype(a))),'Accessories removed');
-async function outfits(){const o=await rb(AVU+`users/${S.user.id}/outfits?itemsPerPage=50&isEditable=true`);if(!$('#outf'))return;
- if(o.error){$('#outf').innerHTML=avErr(o.error);return}
+async function outfits(){const o=await rb(AVU+`users/${S.user.id}/outfits?itemsPerPage=50&isEditable=true`);if(AVT!='Outfits'||!$('#ward'))return;
+ if(o.error){$('#ward').innerHTML=avErr(o.error);return}
  OL=o.data||[];const ot=await th('users/outfits','userOutfitIds',OL.map(x=>x.id));
- $('#outf').innerHTML=OL.map((x,i)=>`<div class=tile><img src="${esc(ot[x.id]||'')}" onclick="wearOutfit(${x.id})"><b>${esc(x.name)}</b><div class=row style="gap:4px;justify-content:center"><button class="btn sm" onclick="wearOutfit(${x.id})">Wear</button><button class="btn alt sm" title=Rename onclick="renOutfit(${i})">&#9998;</button><button class="btn alt sm" title=Delete onclick="delOutfit(${i})">&#128465;</button></div></div>`).join('')||'<small>No outfits yet</small>'}
+ $('#ward').innerHTML=OL.map((x,i)=>`<div class=tile><img src="${esc(ot[x.id]||'')}" onclick="wearOutfit(${x.id})"><b>${esc(x.name)}</b><div class=row style="gap:4px;justify-content:center"><button class="btn sm" onclick="wearOutfit(${x.id})">Wear</button><button class="btn alt sm" title=Rename onclick="renOutfit(${i})">&#9998;</button><button class="btn alt sm" title=Delete onclick="delOutfit(${i})">&#128465;</button></div></div>`).join('')||'<small>No outfits yet</small>'}
 // Wear a saved outfit. Roblox's direct "wear" call can succeed without changing anything (or reject the whole outfit over one
 // unavailable item), so the result is verified against the live avatar and, if needed, the outfit is rebuilt item by item.
 async function wearOutfit(id){
@@ -1395,13 +1562,13 @@ async function wearOutfit(id){
  }catch(e){toast('Could not wear the outfit: '+e.message,6000)}}
 async function saveOutfit(){const n=await askText('Name for the new outfit','',{title:'Save current avatar as outfit'});if(!n)return;
  const r=await rb(AVU+'outfits/create',{name:n,bodyColors:AV.bodyColors,assets:(AV.assets||[]).map(a=>a.meta?{id:a.id,meta:a.meta}:{id:a.id}),scale:AV.scales,playerAvatarType:AV.playerAvatarType});
- if(r.error)return toast(r.error,5000);toast('Outfit saved');outfits()}
+ if(r.error)return toast(r.error,5000);toast('Outfit saved');if(AVT=='Outfits')outfits()}
 async function renOutfit(i){const o=OL[i];if(!o)return;const n=await askText('New name','' +o.name,{title:'Rename outfit',ok:'Rename'});if(!n)return;
- const r=await rb(AVU+`outfits/${o.id}`,{name:n},'PATCH');if(r.error)return toast(r.error,5000);toast('Renamed');outfits()}
+ const r=await rb(AVU+`outfits/${o.id}`,{name:n},'PATCH');if(r.error)return toast(r.error,5000);toast('Renamed');avTab()}
 async function delOutfit(i){const o=OL[i];if(!o)return;if(!await ask(`Delete outfit "${o.name}"?`,{ok:'Delete',danger:1,title:'Delete outfit'}))return;
- const r=await rb(AVU+`outfits/${o.id}/delete`,{});if(r.error)return toast(r.error,5000);toast('Outfit deleted');outfits()}
-async function skin(c){const b={};['head','torso','rightArm','leftArm','rightLeg','leftLeg'].forEach(x=>b[x+'ColorId']=c);avResult(await rb(AVU+'avatar/set-body-colors',b),'Skin tone set')}
-const redraw=async()=>{await rb(AVU+'redraw-thumbnail',{});toast('Re-rendering...');setTimeout(bust,2500)};
+ const r=await rb(AVU+`outfits/${o.id}/delete`,{});if(r.error)return toast(r.error,5000);toast('Outfit deleted');avTab()}
+async function skin(c){const b={};['head','torso','rightArm','leftArm','rightLeg','leftLeg'].forEach(x=>b[x+'ColorId']=c);avBusy(1);avResult(await rb(AVU+'avatar/set-body-colors',b),'Skin tone set')}
+const redraw=async()=>{avBusy(1);await rb(AVU+'redraw-thumbnail',{});toast('Re-rendering...');setTimeout(bust,2500)};
 // ---- tweaks & mods (Bloxstrap-style)
 const FFP=[
  ['Disable shadows','Big FPS gain, flatter look',{FIntRenderShadowIntensity:0}],
@@ -1447,10 +1614,19 @@ Object.assign(PAGES,{async tweaks(){const [s,m]=await Promise.all([api('sober'),
  <div class=card><b>Also in Sober Settings</b><small>Discord Rich Presence, server location indicator, close-on-leave, OpenGL, old death sound and launch command presets.</small><button class="btn alt sm" onclick="go('sober')">Open Sober Settings</button></div>`}});
 // ---- catalog / buying
 const buyable=x=>(x.itemType=='Asset'||x.itemType=='Bundle')&&x.price!=null&&!(x.itemRestrictions||[]).length;
-async function cat(){const free=$('#cf').checked?'&MinPrice=0&MaxPrice=0':'',q=$('#cq').value.trim();$('#cat').innerHTML='Loading…';
- const r=await rb(`https://catalog.roblox.com/v1/search/items/details?Keyword=${encodeURIComponent(q)}&Category=${$('#cc').value||1}&Limit=30&SortType=0${free}`);
- if(r.error)return $('#cat').innerHTML=esc(r.error);
- CAT=(r.data||[]).map(x=>{if(x.price==null&&x.priceStatus=='Free')x.price=0;return x});
+// Roblox answers "invalid argument" when one query parameter is not accepted, so the search steps down to simpler requests.
+async function catSearch(q,c,free){
+ const kw=q?'&Keyword='+encodeURIComponent(q):'',pr=free?'&MinPrice=0&MaxPrice=0':'',B='https://catalog.roblox.com/v1/search/items/details?Limit=30'+kw,cg=c?'&Category='+c:'';
+ let err='';
+ for(const u of [B+cg+'&SortType=0'+pr,B+cg+pr,B+cg,B]){const r=await rb(u);if(!r.error)return(r.data||[]);err=r.error;if(!/invalid|argument|bad request|HTTP 400/i.test(err))throw new Error(err)}
+ for(const u of ['https://catalog.roblox.com/v1/search/items?Limit=30'+kw+cg,'https://catalog.roblox.com/v1/search/items?Limit=30'+kw]){   // plain search + details lookup
+  const s=await rb(u);if(s.error){err=s.error;continue}
+  const items=(s.data||[]).map(x=>({itemType:x.itemType,id:x.id}));if(!items.length)return[];
+  const d=await rb('https://catalog.roblox.com/v1/catalog/items/details',{items});if(d.error){err=d.error;continue}return d.data||[]}
+ throw new Error(err||'Catalog search failed')}
+async function cat(){const free=$('#cf').checked,q=$('#cq').value.trim();$('#cat').innerHTML='Loading…';
+ let data;try{data=await catSearch(q,$('#cc').value,free)}catch(e){return $('#cat').innerHTML=`${esc(e.message)}<div class=row style="margin-top:8px"><button class="btn alt sm" onclick="open_('https://www.roblox.com/catalog?Keyword='+encodeURIComponent($('#cq').value))">Search on roblox.com instead</button></div>`}
+ CAT=data.map(x=>{if(x.price==null&&x.priceStatus=='Free')x.price=0;return x}).filter(x=>!free||x.price===0);
  const ids=t=>CAT.filter(x=>x.itemType==t).map(x=>x.id);
  const [ta,tb]=await Promise.all([th('assets','assetIds',ids('Asset')),th('bundles/thumbnails','bundleIds',ids('Bundle'))]);
  $('#cat').innerHTML=CAT.map((x,i)=>{const bun=x.itemType=='Bundle',im=(bun?tb:ta)[x.id]||'',pr=x.price==null?(x.priceStatus=='NoResellers'?'No resellers':'Off sale'):x.price?'R$ '+x.price:'Free';
@@ -1471,27 +1647,90 @@ async function buy(i){const x=CAT[i];if(!x)return;
  if(!sellers.length)return toast('Could not read the seller for this item',4500);
  if(!await ask(`Buy "${x.name}" for ${price?'R$ '+price:'free'}?\nYour balance: R$ ${S.user.robux??'?'}`,{ok:'Buy',title:'Confirm purchase'}))return;
  let r={},msg='';
- for(const sl of sellers){   // Roblox answers "invalid arguments" when the seller id is the wrong one of the creator ids, so try each
-  r=await rb(`https://economy.roblox.com/v1/purchases/products/${pid}`,{expectedCurrency:1,expectedPrice:price,expectedSellerId:sl});
+ const prices=[...new Set([price,Number(x.price)||0])];
+ outer:for(const pc of prices)for(const sl of sellers){   // Roblox answers "invalid arguments" when the seller id or price is not the one it expects, so try each
+  r=await rb(`https://economy.roblox.com/v1/purchases/products/${pid}`,{expectedCurrency:1,expectedPrice:pc,expectedSellerId:sl});
   msg=String(r.error||r.errorMsg||r.reason||r.title||'');
-  if(r.purchased||!/invalid|argument|seller|mismatch/i.test(msg))break}
+  if(r.purchased||!/invalid|argument|seller|mismatch|price/i.test(msg))break outer}
  if(!r.purchased&&/invalid|argument/i.test(msg)){
   if(await ask(`Roblox rejected the purchase (${msg}).\nOpen the item page to buy it there instead?`,{ok:'Open page',title:'Could not buy here'}))open_(`https://www.roblox.com/${bun?'bundles':'catalog'}/${x.id}`);return}
  if(r.error&&!r.purchased)return toast(r.error,5000);
  toast(r.purchased?(bun?'Purchased! Press Wear on it, or find it in Avatar > Wardrobe > Bundles':'Purchased! Find it in Avatar > Wardrobe'):(msg||'Not purchased'),5000);
  api('me').then(u=>{if(u.robux!=null){S.user=u;const e=$('header .pill:not(#act)');e&&(e.textContent='R$ '+u.robux.toLocaleString())}})}
-// ---- profile lookup
-async function prof(){const r=await rb('https://users.roblox.com/v1/usernames/users',{usernames:[$('#pu').value],excludeBannedUsers:true}),u=r.data&&r.data[0];if(!u)return $('#pf').innerHTML='User not found';
- const [i,a,b,c,bd,av]=await Promise.all([`users/v1/users/${u.id}`,`friends/v1/users/${u.id}/friends/count`,`friends/v1/users/${u.id}/followers/count`,`friends/v1/users/${u.id}/followings/count`,`badges/v1/users/${u.id}/badges?limit=12&sortOrder=Desc`,`thumbnails/v1/users/avatar?userIds=${u.id}&size=420x420&format=Png`].map(x=>{const[h,...p]=x.split('/');return rb(`https://${h}.roblox.com/${p.join('/')}`)}));
- const me=S.user&&S.user.id==u.id;
- $('#pf').innerHTML=`<div class=card><div class=row style="align-items:flex-start;gap:20px"><img src="${esc(av.data&&av.data[0]?av.data[0].imageUrl:'')}" style="width:220px"><div style="flex:1"><h2 style="margin:0">${esc(i.displayName)}</h2><small>@${esc(i.name)} · joined ${(i.created||'').slice(0,10)}</small><p>${esc(i.description)}</p><span class=stat><b>${a.count}</b>friends</span><span class=stat><b>${b.count}</b>followers</span><span class=stat><b>${c.count}</b>following</span>
- <div>${S.connected&&!me?`<button class=btn onclick="guard(rb('https://friends.roblox.com/v1/users/${u.id}/request-friend',{}),'Request sent')">Add friend</button><button class="btn alt" onclick="guard(rb('https://friends.roblox.com/v1/users/${u.id}/follow',{}),'Following')">Follow</button><button class="btn alt" onclick="blockU(${u.id})">Block</button>`:''}<button class="btn alt" onclick="open_('https://www.roblox.com/users/${u.id}/profile')">Open on roblox.com</button><button class="btn alt" onclick="copy('https://www.roblox.com/users/${u.id}/profile')">Copy link</button></div></div></div></div>${(bd.data||[]).length?`<div class=card><b>Recent badges</b><small>${bd.data.map(x=>esc(x.name)).join(' · ')}</small></div>`:''}`}
+// ---- blocking (real Roblox account) + profile lookup
+const UB='https://apis.roblox.com/user-blocking-api/v1/';
+let BLK=null,PCUR=null,PNAME={};
+async function blockCall(id,on){let r=await rb(UB+'users/'+id+(on?'/block-user':'/unblock-user'),{});if(r&&r.error)r=await rb('https://accountsettings.roblox.com/v1/users/'+id+(on?'/block':'/unblock'),{});return r||{}}
+async function blkLoad(force){if(BLK&&!force)return BLK;let ids=[],cur='',out=null;
+ for(let i=0;i<40;i++){const r=await rb(UB+'users/get-blocked-users?count=50'+(cur?'&cursor='+encodeURIComponent(cur):''));
+  if(r.error){if(i)break;const o=await rb('https://accountsettings.roblox.com/v1/users/get-detailed-blocked-users');if(o.error)return{error:r.error};out=(o.blockedUsers||[]).map(x=>({id:x.userId,name:x.name||'',display:x.displayName||x.name||''}));break}
+  const d=r.data||r,l=d.blockedUserIds||[];ids=ids.concat(l);cur=d.cursor||d.nextPageCursor;if(!cur||!l.length)break}
+ if(!out){const nm={};for(let i=0;i<ids.length;i+=100){const u=await rb('https://users.roblox.com/v1/users',{userIds:ids.slice(i,i+100),excludeBannedUsers:false});(u.data||[]).forEach(x=>nm[x.id]=x)}
+  out=ids.map(id=>{const x=nm[id]||{};return{id,name:x.name||'',display:x.displayName||x.name||('User '+id)}})}
+ return BLK=out}
+const blkRows=l=>l.length?l.map(x=>`<div class=row style="margin:6px 0"><span style="flex:1"><b>${esc(x.display||x.name)}</b>${x.name?` <small style="display:inline">@${esc(x.name)}</small>`:''}</span><button class="btn alt sm" onclick="prof(${x.id})">Profile</button><button class="btn alt sm" onclick="unblockU(${x.id})">Unblock</button></div>`).join(''):'<small>You have not blocked anyone</small>';
+async function blkDraw(){const el=$('#pblk');if(!el||!S.connected)return;el.innerHTML='<div class=card><b>🚫 Blocked users</b><small>People you blocked on your Roblox account. Unblock them here.</small><div id=pbl>Loading…</div></div>';const l=await blkLoad(true),e=$('#pbl');if(e)e.innerHTML=l.error?esc(l.error):blkRows(l)}
+async function blkAfter(){await blkLoad(true);if(tab=='profile'){blkDraw();PCUR&&prof(PCUR)}else if(tab=='rset')rset2()}
+async function blockU(id){const nm=PNAME[id]||'this user';if(!await ask('Block '+nm+' on Roblox?\nThis blocks them on your real Roblox account, not just in Sober Hub. You can unblock them from their profile or from the Blocked users list on the Profile tab.',{ok:'Block',danger:1,title:'Block on Roblox'}))return;const r=await guard(blockCall(id,true),'Blocked on Roblox');if(!r.error)blkAfter()}
+async function unblockU(id){const r=await guard(blockCall(id,false),'Unblocked on Roblox');if(!r.error)blkAfter()}
+const hsx=(u,b)=>rb(u,b).catch(()=>({error:'failed'}));
+async function fillUsers(list){const need=list.filter(f=>!(f.name&&f.displayName)).map(f=>f.id),nm={};for(let i=0;i<need.length;i+=100){const u=await rb('https://users.roblox.com/v1/users',{userIds:need.slice(i,i+100),excludeBannedUsers:false});(u.data||[]).forEach(x=>nm[x.id]=x)}
+ return list.map(f=>{const x=nm[f.id]||{};return{id:f.id,name:f.name||x.name||'',display:f.displayName||x.displayName||f.name||x.name||('User '+f.id)}})}
+async function thumbMap(kind,ids,q){const m={};for(let i=0;i<ids.length;i+=100){const r=await hsx('https://thumbnails.roblox.com/v1/'+kind+'?'+q+'='+ids.slice(i,i+100).join(',')+'&returnPolicy=PlaceHolder&size=150x150&format=Png');(r.data||[]).forEach(x=>m[x.targetId]=x.imageUrl)}return m}
+const psec=(t,h)=>h?`<div class=card><b>${t}</b><div style="margin-top:8px">${h}</div></div>`:'';
+async function prof(pid){const box=$('#pf');if(!box)return;box.innerHTML='Looking up…';let id=pid;
+ if(!id){const nm=($('#pu').value||'').trim();if(!nm)return box.innerHTML='Type a username first';
+  const r=await rb('https://users.roblox.com/v1/usernames/users',{usernames:[nm],excludeBannedUsers:false}),u0=r.data&&r.data[0];if(!u0)return box.innerHTML='User not found';id=u0.id}
+ PCUR=id;const me=S.user&&S.user.id==id,U='https://users.roblox.com/v1/users/'+id,F='https://friends.roblox.com/v1/users/'+id;
+ const [i,fc,fo,fi,pr,av,hs,gr,fl,cg,fg,wr,rbd,sl,bd,st,bl]=await Promise.all([
+  hsx(U),hsx(F+'/friends/count'),hsx(F+'/followers/count'),hsx(F+'/followings/count'),
+  S.connected?hsx('https://presence.roblox.com/v1/presence/users',{userIds:[id]}):{},
+  hsx('https://thumbnails.roblox.com/v1/users/avatar?userIds='+id+'&size=420x420&format=Png'),
+  hsx(U+'/username-history?limit=25&sortOrder=Desc'),
+  hsx('https://groups.roblox.com/v2/users/'+id+'/groups/roles'),
+  hsx(F+'/friends'),
+  hsx('https://games.roblox.com/v2/users/'+id+'/games?accessFilter=Public&limit=12&sortOrder=Desc'),
+  hsx('https://games.roblox.com/v2/users/'+id+'/favorite/games?accessFilter=2&limit=12&sortOrder=Desc'),
+  hsx('https://avatar.roblox.com/v1/users/'+id+'/avatar'),
+  hsx('https://accountinformation.roblox.com/v1/users/'+id+'/roblox-badges'),
+  hsx('https://accountinformation.roblox.com/v1/users/'+id+'/promotion-channels'),
+  hsx('https://badges.roblox.com/v1/users/'+id+'/badges?limit=12&sortOrder=Desc'),
+  S.connected&&!me?hsx('https://friends.roblox.com/v1/users/'+S.user.id+'/friends/statuses?userIds='+id):{},
+  S.connected&&!me?blkLoad():[]]);
+ if(i.error||!i.name)return box.innerHTML=esc(i.error||'User not found');
+ PNAME[id]=i.displayName||i.name;const pu=$('#pu');if(pu)pu.value=i.name;
+ const frl=await fillUsers((fl.data||[]).map(x=>({id:x.id,name:x.name,displayName:x.displayName})));
+ const exp=(cg.data||[]).filter(x=>x.rootPlace&&x.rootPlace.id),fav=(fg.data||[]).filter(x=>x.rootPlace&&x.rootPlace.id),wa=(wr.assets||[]);
+ const [fth,gth,ath]=await Promise.all([thumbMap('users/avatar-headshot',frl.map(f=>f.id),'userIds'),thumbMap('games/icons',[...new Set([...exp,...fav].map(x=>x.id))],'universeIds'),thumbMap('assets',wa.map(a=>a.id),'assetIds')]);
+ const p=((pr.userPresences||[])[0])||{},stt=((st.data||[])[0]||{}).status||'',isF=!!(S.connected&&!me&&(stt=='Friends'||FR.some(f=>f.id==id))),isB=Array.isArray(bl)&&bl.some(x=>x.id==id);
+ const where=p.userPresenceType==2?'🟢 In game'+(p.lastLocation?': <b>'+esc(p.lastLocation)+'</b>':''):p.userPresenceType==1?'🔵 Online':p.userPresenceType==3?'🟠 In Studio':S.connected?'⚫ Offline'+(p.lastOnline?' · last online '+esc(new Date(p.lastOnline).toLocaleString()):''):'';
+ const pasts=(hs.data||[]).map(x=>esc(x.name)).join(' · '),sls=Object.entries(sl&&!sl.error?sl:{}).filter(([k,v])=>typeof v=='string'&&v).map(([k,v])=>`<span class=stat style="margin-right:14px"><b style="font-size:13px">${esc(v)}</b>${esc(k)}</span>`).join('');
+ const rbs=(Array.isArray(rbd)?rbd:[]).map(x=>`<img title="${esc(x.name)}" src="${esc(x.imageUrl||'')}" style="width:40px;height:40px;margin-right:6px">`).join('');
+ let acts='';
+ if(S.connected&&!me){
+  if(isF)acts+=`<span class=badge style="background:var(--green);margin:0 8px 0 0">✓ Friends</span><button class="btn alt" onclick="chatWith(${id})">💬 Message</button>`;
+  else if(stt=='RequestSent')acts+=`<button class="btn alt" disabled>Request sent</button>`;
+  else if(stt=='RequestReceived')acts+=`<button class=btn onclick="guard(rb('https://friends.roblox.com/v1/users/${id}/accept-friend-request',{}),'Friend request accepted').then(()=>prof(${id}))">Accept request</button>`;
+  else acts+=`<button class=btn onclick="guard(rb('https://friends.roblox.com/v1/users/${id}/request-friend',{}),'Request sent').then(()=>prof(${id}))">Add friend</button>`;
+  if(isF&&p.userPresenceType==2&&p.rootPlaceId)acts+=`<button class="btn play" style="padding:9px 22px" onclick="pl(${p.rootPlaceId},'${esc(p.gameId||'')}')">Join in Sober</button>`;
+  acts+=`<button class="btn alt" onclick="guard(rb('https://friends.roblox.com/v1/users/${id}/follow',{}),'Following')">Follow</button>`;
+  acts+=isB?`<button class="btn alt" onclick="unblockU(${id})">✅ Unblock</button>`:`<button class="btn alt" onclick="blockU(${id})">🚫 Block</button>`}
+ acts+=`<button class="btn alt" onclick="open_('https://www.roblox.com/users/${id}/profile')">Open on roblox.com</button><button class="btn alt" onclick="copy('https://www.roblox.com/users/${id}/profile')">Copy link</button>`;
+ box.innerHTML=`<div class=card><div class=row style="align-items:flex-start;gap:20px"><img src="${esc(av.data&&av.data[0]?av.data[0].imageUrl:'')}" style="width:220px"><div style="flex:1;min-width:260px"><h2 style="margin:0">${esc(i.displayName)}${i.hasVerifiedBadge?' ✔':''}</h2><small>@${esc(i.name)} · joined ${esc((i.created||'').slice(0,10))} · ID ${id}</small>${i.isBanned?'<small style="color:#e5484d">⛔ This account is banned</small>':''}${where?`<p style="margin:8px 0">${where}</p>`:''}${isB?'<small style="color:#e5484d">🚫 You have blocked this user on Roblox</small>':''}${i.description?`<p style="white-space:pre-wrap">${esc(i.description)}</p>`:'<small>No about text</small>'}
+ <span class=stat><b>${fc.count??'—'}</b>friends</span><span class=stat><b>${fo.count??'—'}</b>followers</span><span class=stat><b>${fi.count??'—'}</b>following</span>${pasts?`<small style="margin-top:8px">Past usernames: ${pasts}</small>`:''}${sls?`<div style="margin-top:8px">${sls}</div>`:''}${rbs?`<div style="margin-top:8px">${rbs}</div>`:''}
+ <div class=row style="margin-top:12px">${acts}</div></div></div></div>`
+ +psec('Currently wearing ('+wa.length+')',wa.length?`<div style="display:flex;flex-wrap:wrap;gap:10px">${wa.map(a=>`<div style="width:84px;text-align:center;cursor:pointer" title="${esc(a.name)}" onclick="open_('https://www.roblox.com/catalog/${a.id}')"><img loading=lazy src="${esc(ath[a.id]||'')}" style="width:72px;height:72px;border-radius:var(--radius);background:#ffffff0d"><small style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.name)}</small></div>`).join('')}</div>`:'')
+ +psec('Experiences made by '+esc(i.displayName)+' ('+exp.length+')',exp.length?`<div class=rs>${exp.map(x=>tile({place:x.rootPlace.id,name:x.name,icon:gth[x.id]},(x.placeVisits||0).toLocaleString()+' visits')).join('')}</div>`:'')
+ +psec('Favorite experiences',fav.length?`<div class=rs>${fav.map(x=>tile({place:x.rootPlace.id,name:x.name,icon:gth[x.id]},'')).join('')}</div>`:'')
+ +psec('Groups ('+(gr.data||[]).length+')',(gr.data||[]).length?`<table>${gr.data.map(x=>`<tr><td><b>${esc((x.group||{}).name)}</b>${(x.group||{}).hasVerifiedBadge?' ✔':''}<small style="margin:0">${esc((x.role||{}).name||'')}</small></td><td style="text-align:right"><small style="margin:0">${((x.group||{}).memberCount||0).toLocaleString()} members</small></td><td style="text-align:right"><button class="btn alt sm" onclick="open_('https://www.roblox.com/groups/${(x.group||{}).id}')">Open</button></td></tr>`).join('')}</table>`:'')
+ +psec('Friends ('+frl.length+')',frl.length?`<div style="display:flex;flex-wrap:wrap;gap:12px;max-height:320px;overflow:auto">${frl.map(f=>`<div class=fr onclick="prof(${f.id})" title="@${esc(f.name)}"><div class=ava><img loading=lazy src="${esc(fth[f.id]||'')}"></div><b>${esc(f.display)}</b><small>@${esc(f.name)}</small></div>`).join('')}</div>`:'')
+ +((bd.data||[]).length?psec('Recent badges',`<small>${bd.data.map(x=>esc(x.name)).join(' · ')}</small>`):'')}
 // ---- roblox settings
 const PRIV=[['Who can chat with me (app)','app-chat-privacy','appChatPrivacy',['NoOne','Friends','Everyone']],['Who can chat with me (in experience)','game-chat-privacy','gameChatPrivacy',['NoOne','Friends','Everyone']],['Who can see my inventory','inventory-privacy','inventoryPrivacy',['NoOne','Friends','FriendsAndFollowing','AllUsers']]];
 async function privLoad(){let h='';for(const [n,u,k,o] of PRIV){const r=await rb('https://accountsettings.roblox.com/v1/'+u),v=r[k];
  h+=r.error?`<div>${n}: <small style="display:inline">unavailable</small></div>`:`<div class=row style="margin:6px 0"><span style="width:300px">${n}</span><select onchange="guard(rb('https://accountsettings.roblox.com/v1/${u}',{${k}:this.value}),'Saved')">${[...new Set([v,...o])].map(x=>`<option ${x==v?'selected':''}>${x}</option>`).join('')}</select></div>`}
  $('#priv').innerHTML=h;
- const b=await rb('https://accountsettings.roblox.com/v1/users/get-detailed-blocked-users');$('#blk').innerHTML=b.error?esc(b.error):(b.blockedUsers||[]).map(x=>`<div class=row><span style="width:240px">${esc(x.displayName||x.name)}</span><button class="btn alt" onclick="guard(rb('https://accountsettings.roblox.com/v1/users/${x.userId}/unblock',{}),'Unblocked').then(rset2)">Unblock</button></div>`).join('')||'<small>No blocked users</small>'}
+ const b=await blkLoad(true);$('#blk').innerHTML=b.error?esc(b.error):blkRows(b)}
 const rset2=()=>go('rset');
 const saveAbout=()=>guard(rb('https://users.roblox.com/v1/description',{description:$('#about').value}),'About saved');
 const saveDn=()=>guard(rb(`https://users.roblox.com/v1/users/${S.user.id}/display-names`,{newDisplayName:$('#dn').value},'PATCH'),'Display name changed');
@@ -1501,17 +1740,22 @@ async function loadMsgs(reset){if(reset){MP=0;$('#msg').innerHTML=''}const r=awa
  const html=(r.collection||[]).map(m=>`<details><summary>${m.isRead?'':'● '}<b>${esc(m.subject)}</b> — ${esc(MT=='Sent'?(m.recipient&&m.recipient.displayName):(m.sender&&m.sender.displayName))} <small style="display:inline">${(m.created||'').slice(0,10)}</small></summary><p>${esc(m.body)}</p></details>`).join('');
  el.insertAdjacentHTML('beforeend',html);if(MP==0&&!html)el.innerHTML='<small>Nothing here</small>';MP++;const mm=$('#mm');mm&&(mm.style.display=MP<(r.totalPages||0)?'inline-block':'none')}
 Object.assign(PAGES,{
- avatar(){return needConn()||`<h2>Avatar</h2><div class=row style="align-items:flex-start;gap:20px"><div class=card style="text-align:center"><img id=bust style="width:260px;min-height:260px"><div><button class="btn alt" onclick="redraw()">Refresh render</button></div><div id=avopt style="text-align:left;margin-top:10px;min-width:260px"></div></div><div style="flex:1;min-width:320px"><div class=card><div class=row><b style="flex:1">Wearing</b><button class="btn alt sm" onclick="unwearAcc()">Remove all accessories</button></div><div id=worn class=rs>Loading...</div></div><div class=card><div class=row><b style="flex:1">Outfits</b><button class="btn sm" onclick="saveOutfit()">+ Save current</button></div><div id=outf class=rs>...</div></div><div class=card><b>Body color</b><div class=row style="margin-top:8px">${SKIN.map(c=>`<span style="width:30px;height:30px;border-radius:50%;cursor:pointer;background:${c[1]}" onclick="skin(${c[0]})"></span>`).join('')}</div></div></div></div><div class=card><div class=row><b>Wardrobe</b><select id=wt onchange="wardrobe()">${[...WT,'Bundles'].map(t=>`<option>${t}</option>`).join('')}</select><input id=wq placeholder="Filter loaded items..." oninput="wfilter()" style="flex:1"></div><div id=ward class=grid style="margin-top:12px">...</div><button id=wmore class="btn alt" style="display:none;margin-top:10px" onclick="wardrobe(false)">Load more</button></div>`},
- shop(){return needConn()||`<h2>Catalog</h2><div class=row><input id=cq placeholder="Search the catalog…" style="flex:1" onkeydown="if(event.key=='Enter')cat()"><select id=cc>${[[1,'All'],[3,'Clothing'],[11,'Accessories'],[4,'Body parts'],[12,'Animations'],[5,'Gear'],[2,'Collectibles']].map(([v,n])=>`<option value="${v}">${n}</option>`).join('')}</select><label><input type=checkbox id=cf> Free only</label><button class=btn onclick="cat()">Search</button></div><small>Balance: R$ ${S.user&&S.user.robux!=null?S.user.robux.toLocaleString():'?'} · every purchase asks for confirmation first</small><div id=cat class=grid style="margin-top:14px"></div>`},
+ avatar(){return needConn()||`<h2>Avatar</h2><div class=avx><div class="card avl"><div id=bwrap class=busy><img id=bust alt=""></div>
+  <div class=row style="justify-content:center;margin:8px 0">${[['avatar','Full'],['avatar-bust','Bust'],['avatar-headshot','Head']].map(([v,n])=>`<button class="btn alt sm${v==AVV?' sel':''}" data-v=${v} onclick="avView('${v}')">${n}</button>`).join('')}</div>
+  <div class=row style="justify-content:center"><button class="btn alt sm" onclick="avUndo()">↩ Undo</button><button class="btn alt sm" onclick="redraw()">⟳ Re-render</button><button class="btn sm" onclick="saveOutfit()">+ Save outfit</button></div>
+  <div class=row id=avmeta style="justify-content:center;margin-top:8px"></div>
+  <details style="text-align:left;margin-top:10px"><summary>Body, scale &amp; skin tone</summary><div id=avopt style="margin-top:8px"></div><div class=row style="margin-top:10px">${SKIN.map(c=>`<span style="width:28px;height:28px;border-radius:50%;cursor:pointer;background:${c[1]}" onclick="skin(${c[0]})"></span>`).join('')}</div></details></div>
+ <div class=avr><div class=card><div class=row><b style="flex:1">Wearing</b><button class="btn alt sm" onclick="unwearAcc()">Remove accessories</button></div><div id=worn class="rs avw">Loading...</div></div>
+  <div class=card><div class=row id=avtabs></div><div class=row id=avsub style="margin-top:8px"></div><div class=row style="margin-top:8px"><input id=wq placeholder="Search this category..." oninput="wfilter()" style="flex:1"></div><div id=ward class=grid style="margin-top:12px">...</div><button id=wmore class="btn alt" style="display:none;margin-top:10px" onclick="wardrobe(false)">Load more</button></div></div></div>`},
  inbox(){return needConn()||`<h2>Messages</h2><div class=row><select onchange="MT=this.value;loadMsgs(true)">${['Inbox','Sent','Archive'].map(t=>`<option ${t==MT?'selected':''}>${t}</option>`).join('')}</select></div><div id=msg class=card style="margin-top:12px">Loading…</div><button id=mm class="btn alt" style="display:none" onclick="loadMsgs()">Load more</button>`},
  groups(){return needConn()||'<h2>Communities</h2><div id=gr class=card>Loading…</div>'},
- profile(){return `<h2>Profile</h2><div class=row><input id=pu placeholder=Username value="${esc(PU||(S.user?S.user.name:''))}" onkeydown="if(event.key=='Enter')prof()"><button class=btn onclick="prof()">Look up</button></div><div id=pf style="margin-top:14px"></div>`},
+ profile(){return `<h2>Profile</h2><div class=row><input id=pu placeholder=Username value="${esc(PU||(S.user?S.user.name:''))}" onkeydown="if(event.key=='Enter')prof()"><button class=btn onclick="prof()">Look up</button></div><div id=pf style="margin-top:14px"></div><div id=pblk style="margin-top:14px"></div>`},
  rset(){return needConn()||`<h2>Roblox Settings</h2><div class=card><b>Real Roblox settings</b><small>Opens the official roblox.com page in your browser</small><div class=row style="margin-top:8px">${[['Account Info','info'],['Security','security'],['Privacy','privacy'],['Parental Controls','parental-controls'],['Notifications','notifications'],['Billing','billing']].map(([n,h])=>`<button class=btn onclick="open_('https://www.roblox.com/my/account#!/${h}')">${n}</button>`).join('')}</div></div><h3>Quick edits inside Sober Hub</h3><div class=card><b>Profile</b><textarea id=about rows=3 placeholder="About me"></textarea><div class=row><button class=btn onclick="saveAbout()">Save about</button><input id=dn placeholder="New display name"><button class="btn alt" onclick="saveDn()">Change display name</button></div></div><div class=card><b>Privacy</b><div id=priv>Loading…</div></div><div class=card><b>Blocked users</b><div id=blk>Loading…</div></div>`}});
 Object.assign(AFTER,{
- avatar(){if(S.connected)avLoad()},shop(){if(S.connected)cat()},
+ avatar(){if(S.connected)avLoad()},
  inbox(){if(S.connected)loadMsgs(true)},
  async groups(){if(!S.connected)return;const r=await rb(`https://groups.roblox.com/v1/users/${S.user.id}/groups/roles`);$('#gr').innerHTML=r.error?esc(r.error):'<table>'+(r.data||[]).map(x=>`<tr><td><b>${esc(x.group.name)}</b></td><td>${esc(x.role.name)}</td><td>${x.group.memberCount.toLocaleString()} members</td><td><button class="btn alt" onclick="open_('https://www.roblox.com/communities/${x.group.id}')">Open</button></td></tr>`).join('')+'</table>'},
- profile(){if(S.user||PU){prof();PU=''}},
+ profile(){if(S.user||PU){prof();PU=''}blkDraw()},
  async rset(){if(!S.connected)return;rb(`https://users.roblox.com/v1/users/${S.user.id}`).then(r=>{$('#about')&&($('#about').value=r.description||'')});privLoad()}});
 // ---- right-click menu, hidden games / chats, private servers
 const hidSet=()=>new Set((S.hidden_games||[]).map(x=>String(x.place)));
@@ -1585,12 +1829,21 @@ async function pvAddAny(){const l=await pvParse($('#pvl').value);if(!l||l.err||!
 async function pvCode(s){if(s.accessCode)return s.accessCode;const f=await pvFetch(s);if(f.err)throw new Error(f.err);const d=f.d;
  return d.joinCode||((String(d.link||'').match(/privateServerLinkCode=([\w-]+)/)||[])[1])||''}
 const findPrice=(o,d=0)=>{if(!o||typeof o!='object'||d>2)return null;for(const k of Object.keys(o))if(/price/i.test(k)&&typeof o[k]=='number')return o[k];for(const k of Object.keys(o))if(k!='data'&&o[k]&&typeof o[k]=='object'){const v=findPrice(o[k],d+1);if(v!=null)return v}return null};
-const PVP={};
+const PVP={},GNM={};
+async function gName(p){if(GNM[p])return GNM[p];const k=nameOf(p);if(k&&k!=String(p))return GNM[p]=k;try{const g=await api('game',{place:p});if(g&&g.name)return GNM[p]=g.name}catch(e){}return'game '+p}
+async function pvJoinMine(i){const s=MYP[i];if(!s)return;let p=pOf(s);try{
+ if(!p){const f=await pvFetch(s);if(!f.err)p=pOf(f.d)}
+ if(!p)return toast('Roblox did not say which game this server is for',5000);
+ const c=await pvCode(s);if(!c)return toast('Roblox did not return a join code for this server',5000);
+ const nm=await gName(p);play(p,nm,'',null,c)}catch(e){toast(e.message,5000)}}
 async function pvGamePrice(uid,extra){if(uid&&PVP[uid])return PVP[uid];let v={on:true,price:findPrice(extra)};
  if(uid){const en=await rb('https://games.roblox.com/v1/private-servers/enabled-in-universe/'+uid);if(!en.error){v.on=en.privateServersEnabled!==false;const pr=findPrice(en);if(pr!=null)v.price=pr}PVP[uid]=v}return v}
 async function pvPriceLine(el,r){const v=await pvGamePrice(cur&&cur.uid,r);if(!el.isConnected)return;
  el.insertAdjacentHTML('afterbegin',`<small style="display:block;margin:8px 0">💰 ${!v.on?'This game does not offer private servers':v.price==null?'Roblox did not return a price for this game':v.price?'Creating a private server costs R$ '+v.price+' per month':'Private servers are free for this game'}</small>`)}
-async function pvMineP(s,i){const f=await pvFetch(s),e=$('#mp'+i);if(!e||f.err)return;const sb=(f.d&&f.d.subscription)||{};
+async function pvMineP(s,i){const f=await pvFetch(s),e=$('#mp'+i);if(!e||f.err)return;
+ if(!pOf(s)){const q=pOf(f.d);if(q)s.placeId=q}
+ const ge=$('#mg'+i);if(ge&&!ge.textContent){const nm=(f.d.universe&&f.d.universe.name)||(pOf(s)&&await gName(pOf(s)));if(nm)ge.textContent='🎮 '+nm}
+ const sb=(f.d&&f.d.subscription)||{};
  e.textContent=[sb.price!=null?(sb.price?'R$ '+sb.price+'/month':'Free'):'',sb.active===true?'renewal on':sb.active===false?'renewal off':'',sb.expiresAt?'until '+String(sb.expiresAt).slice(0,10):''].filter(Boolean).join(' · ')}
 async function pvLoad(p){const el=$('#pvr');el.innerHTML='Loading…';const r=await rb(`https://games.roblox.com/v1/games/${p}/private-servers`);if(r.error){el.innerHTML=esc(r.error);return}
  PVL=r.data||[];const me=S.user.id;
@@ -1650,13 +1903,13 @@ Object.assign(PAGES,{privs(){const l=S.privs||[],by={};l.forEach((x,i)=>(by[x.pl
  ${Object.entries(by).map(([p,a])=>`<h3 style="margin:12px 0 4px">${esc(nameOf(p))}</h3><table>${a.map(([x,i])=>`<tr><td><b>${esc(x.label||'Private server')}</b></td><td style="text-align:right;white-space:nowrap">${pvBtns(i)}</td></tr>`).join('')}</table>`).join('')||'<small>Nothing saved yet</small>'}</div>
  ${S.connected?'<div class=card><b>Servers you own or rent on Roblox</b><div id=pmine>Loading…</div></div>':needConn()}`}});
 Object.assign(AFTER,{async privs(){if(!S.connected)return;const r=await rb('https://games.roblox.com/v1/private-servers/my-private-servers'),el=$('#pmine');if(!el)return;if(r.error){el.innerHTML=esc(r.error);return}
- MYP=r.data||(Array.isArray(r)?r:[]);el.innerHTML=MYP.length?'<table>'+MYP.map((s,i)=>`<tr><td><b>${esc(s.name||'Private server')}</b><small style="margin:0">${esc((s.game&&s.game.name)||s.gameName||(pOf(s)?nameOf(pOf(s)):''))}</small><small id=mp${i} style="margin:0;color:var(--green)"></small></td><td style="text-align:right;white-space:nowrap"><button class="btn alt sm" onclick="pvManage(MYP[${i}],pOf(MYP[${i}]))">⚙ Manage</button></td></tr>`).join('')+'</table>':'<small>You do not own or rent any private servers</small>';MYP.slice(0,15).forEach(pvMineP)}});
+ MYP=r.data||(Array.isArray(r)?r:[]);el.innerHTML=MYP.length?'<table>'+MYP.map((s,i)=>`<tr><td><b>${esc(s.name||'Private server')}</b><small id=mg${i} style="margin:0">${(()=>{const q=pOf(s),n=(s.game&&s.game.name)||s.gameName||(q&&nameOf(q)!=String(q)?nameOf(q):'');return n?'🎮 '+esc(n):''})()}</small><small id=mp${i} style="margin:0;color:var(--green)"></small></td><td style="text-align:right;white-space:nowrap"><button class="btn sm" onclick="pvJoinMine(${i})">▶ Join</button><button class="btn alt sm" onclick="pvManage(MYP[${i}],pOf(MYP[${i}]))">⚙ Manage</button></td></tr>`).join('')+'</table>':'<small>You do not own or rent any private servers</small>';MYP.forEach((s,i)=>{const q=pOf(s),e=$('#mg'+i);if(q&&e&&!e.textContent)gName(q).then(n=>{e.textContent='🎮 '+n})});MYP.slice(0,15).forEach(pvMineP)}});
 // -- empty-space context menu
-function airMenu(e){const sel=String(getSelection()||'').trim(),lj=S.history&&S.history.find(x=>x.job),it=[];
+function airMenu(e){const sel=String(getSelection()||'').trim(),lj=S.history&&S.history.find(x=>x.job||x.code),it=[];
  if(sel)it.push(['📋 Copy selection',()=>copy(sel)],'-');
  if(tab=='game')it.push(['← Back',()=>go(PT||'games')]);
  it.push(['↻ Refresh',()=>tab=='game'&&cur?openGame(cur.place):go(tab)],['⌨ Quick jump',()=>cmdk()],['🚀 Open Sober',()=>openSober()],'-');
- if(lj)it.push(['↩ Rejoin last server',()=>play(lj.place,lj.name||'',lj.icon||'',lj.job)]);
+ if(lj)it.push(['↩ Rejoin last server',()=>play(lj.place,lj.name||'',lj.icon||'',lj.job||null,lj.code||null)]);
  if(S.favs.length)it.push(['🎲 Random favorite',()=>rnd()]);
  it.push(['🔒 Private servers',()=>go('privs')],'-',['🎨 Style',()=>go('style')],[S.theme.compact=='1'?'▢ Roomy layout':'▣ Compact layout',()=>save({theme:{compact:S.theme.compact=='1'?'0':'1'}},1).then(()=>go(tab))],['⚙ Sober settings',()=>go('sober')]);
  ctxMenu(e,it)}
@@ -1686,7 +1939,7 @@ function cmdk(){if($('#modal'))return $('#modal').remove();const m=document.crea
   CML=out.slice(0,12);$('#cl2').innerHTML=CML.map((x,i)=>`<a class=cmd onclick="cmRun(${i})">${esc(x.t)}</a>`).join('')};
  inp.oninput=draw;inp.onkeydown=e=>{if(e.key=='Enter')cmRun(0)};draw();inp.focus()}
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()=='k'){e.preventDefault();cmdk()}else if(e.key=='Escape'){$('#modal')&&$('#modal').remove()}else if(e.key=='/'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){e.preventDefault();$('#ts')&&$('#ts').focus()}});
-load().then(()=>{updPoll();setInterval(updPoll,60000);chatWatch();setInterval(chatWatch,45000);pollActive();setInterval(pollActive,15000);watch();setInterval(watch,60000)});
+load().then(()=>{updPoll();setInterval(updPoll,60000);chatWatch();setInterval(chatWatch,45000);pollActive();setInterval(pollActive,5000);watch();setInterval(watch,30000)});
 </script></body></html>"""
 
 def install_shortcut():
@@ -1710,6 +1963,7 @@ if __name__ == "__main__":
     try: srv = ThreadingHTTPServer(("127.0.0.1", want), H)
     except OSError: srv = ThreadingHTTPServer(("127.0.0.1", 0), H); want = 0
     PORT[0] = srv.server_port
+    col_recover()
     threading.Thread(target=_upd_loop, daemon=True).start()
     serving = False
     try:
@@ -1728,7 +1982,7 @@ if __name__ == "__main__":
         try: webview.settings["ALLOW_DOWNLOADS"] = True
         except Exception: pass
         try:
-            webview.create_window("Sober Hub", f"http://127.0.0.1:{srv.server_port}/", width=1280, height=820, min_size=(900, 600))
+            WIN[0] = webview.create_window("Sober Hub", f"http://127.0.0.1:{srv.server_port}/", width=1280, height=820, min_size=(900, 600))
             webview.start()
             sys.exit(0)
         except Exception as e:   # pywebview installed but no GTK/Qt backend: carry on in a browser window instead
