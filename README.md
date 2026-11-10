@@ -1,33 +1,80 @@
 > ### ⚠️ WARNING & DISCLAIMER
-> **This app was written with Claude and tested by a human. It can use your Roblox login cookie. Use it at your own risk.**
+> **This app was written with Claude AI and tested by a human. It can use your Roblox login cookie. Use it at your own risk.**
 > - Run it only on your own computer. **Never host it on a cloud server or expose it to a network.**
 > - **I am not responsible for any bans, lost items, lost Robux or anything else caused by this software.**
 > - Sober Hub is an unofficial community project. It is not affiliated with or endorsed by Roblox or the Sober / VinegarHQ team.
 
+<h1 align="center">🧊 Sober Hub</h1>
 
-(this is a screenshot of the launcher with the sunset theme from theme presets)
-![Sober Hub Image](https://raw.githubusercontent.com/Phsyt/Sober-hub-/refs/heads/main/image.png
-)
+<p align="center">
+  <b>The missing front end for Sober (Roblox on Linux).</b><br>
+  Friends, avatar, servers, tweaks and stats, in one fast local app.<br>
+  One Python file · no dependencies · no Electron · no telemetry
+</p>
 
-# 🧊 Sober Hub
+<p align="center">
+  <a href="https://soberhub-web.vercel.app"><b>🌐 Live demo (mockup)</b></a> ·
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="#-what-makes-it-different">What's different</a> ·
+  <a href="#-security--privacy">Security</a>
+</p>
 
-**Sober Hub** is a lightweight launcher and companion desktop app for [**Sober**](https://sober.vinegarhq.org/) (Roblox on Linux). It is a single Python file with no required dependencies. It gives you a Roblox-style home for launching games, discovering new ones, managing your avatar, tweaking Sober, and keeping track of your playtime.
+![Sober Hub](https://raw.githubusercontent.com/Phsyt/Sober-hub-/refs/heads/main/image.png)
+
+*Sober Hub with the Sunset theme preset.* The [live demo](https://soberhub-web.vercel.app) is a mockup with sample data, not the real app.
+
+---
+
+**Sober Hub** is a lightweight launcher and companion desktop app for [**Sober**](https://sober.vinegarhq.org/) (Roblox on Linux). Sober runs Roblox; Sober Hub is everything around it: a Roblox-style home for launching games, seeing and joining friends, managing your avatar and private servers, tweaking Sober, and tracking your playtime. It is a single Python file with no required dependencies.
+
+## 🔥 What makes it different
+
+| | |
+|---|---|
+| 🔁 **Rejoin last server that actually works** | Press plain Play and the hub works out which server you landed in and remembers it, so **Rejoin last server** works for every launch, not just ones started from a link. *(Needs a connected account.)* |
+| 🏠 **Back to the hub when you leave a game** | Sober normally drops you on its own home screen. For games started from the hub, the hub turns on Sober's `close_on_leave`, brings its window to the front when you exit, and restores your own setting afterwards (even if the hub was closed mid-game). |
+| 🔔 **Live friend notifications** | Animated cards with avatar, game icon, sound and a **Join** button when a friend starts playing or comes online, plus real desktop notifications through `notify-send`. Pinned friends or everyone. Glitchy "everyone went offline" polls are ignored, so no notification floods. |
+| 🎯 **Recommendations you control** | Built-in picks ranked locally from your own history, Roblox's own sorts, or **your own recommendations API**. Right-click any game to hide it. |
+| 🔒 **A real private server manager** | Join servers you own or rent, create, rename, manage members and friend access, lock down or open up, regenerate the link, manage renewal. |
+| 🧩 **Tweaks that stick** | Sober rewrites its config on exit and can undo your changes. The hub closes Sober first, writes the change and reads it back to confirm. |
+| 🕵️ **Complete profile lookup** | Online status, avatar, about, past usernames, social links, badges, what they're wearing, groups, **every** friend (not just the first 200), experiences, favorites and recent badges. |
+| 🛡️ **Private by design** | Local only, no analytics, no cloud. Log in with **Quick Login** so no password or cookie has to be typed. |
+
+### How it compares
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Launch games in Sober | ✅ | ✅ | ✅ |
+| Friends online + one-click join | ✅ | ❌ | ✅ |
+| Live pop-up + desktop friend alerts | ❌ | ❌ | ✅ |
+| Rejoin last server (even after plain Play) | ❌ | ❌ | ✅ |
+| Returns to the launcher when you leave a game | ❌ | ❌ | ✅ |
+| Avatar editor with outfits and undo | ✅ | ❌ | ✅ |
+| Private server manager | ✅ | ❌ | ✅ |
+| Fast Flag editor + mods with safe apply | ❌ | manual file edit | ✅ |
+| Local playtime stats and streaks | ❌ | ❌ | ✅ |
+| Custom recommendations API | ❌ | ❌ | ✅ |
+| Custom themes and CSS | ❌ | ❌ | ✅ |
 
 ## ✨ Features
 
-* 🎮 **Launcher & Quick Join:** Launch by place ID, `roblox.com/games` link, `roblox://` link or private-server link. Browse public servers and join a friend's server directly.
-* 💎 **Better Recommendations (default):** Trending games, hidden gems and picks matched to your play history, built from the community-made Rolimons game list plus Roblox's own APIs. You can switch back to normal Roblox recommendations, or plug in your own API (see [below](#-recommendations)).
-* 🧍 **Avatar Editor:** Wardrobe by item type, worn items, saved outfits (wear, rename, delete, save current), skin tones, R6/R15 switching, body scales, and **bundles** (wear any bundle you own).
-* 🛒 **Catalog:** Search items and bundles, buy them with a confirmation prompt, and wear bundles straight from the results.
-* ⚙️ **Tweaks & Mods:** Bloxstrap-style fast-flag presets (FPS cap, lighting technology, texture quality, graphics level, no shadows, no post-processing, no grass), fast-flag import/export, and an asset overlay for custom death sounds, cursors or any file under `content/`.
-* 🛠 **Sober Settings:** Edit Sober's own options and fast flags, update Sober, force-quit it, and open its config folder.
-* 📊 **Playtime Analytics:** Total, daily and per-game playtime, a 14-day chart, longest sessions, and CSV export. An optional break reminder fires while a game launched from the hub is running.
-* 👥 **Friends & Social:** Online status and in-game location for every friend, pinned friends, join-in-their-server, friend requests (accept or send in bulk), and desktop notifications.
-* 💬 **Chat & Messages:** Roblox chat, inbox/sent/archive messages, and account privacy toggles.
-* 🔒 **Private Servers:** Save and label private-server links and manage the ones you own.
+* 🎮 **Launcher & Quick Join:** Launch by place ID, `roblox.com/games` link, `roblox://` link or private-server link. Browse public servers (emptiest, fullest, best ping, random) and join a friend's server directly.
+* 💎 **Better Recommendations (default):** *Picked for you*, *Trending now*, *Hidden gems* and *More <your top genre>*, built from the community-made Rolimons game list plus Roblox's own APIs. Switch to Roblox's recommendations or your own API (see [Recommendations](#-recommendations)).
+* 🧍 **Avatar Editor:** Live render with Full / Bust / Head views, wardrobe by item type, instant wear and remove, **Undo**, saved outfits (wear, rename, delete, save current), skin tones, R6/R15, body scales and **bundles**.
+* 👥 **Friends & Social:** Online status and in-game location for every friend, pinning, search, join-in-their-server, friend requests (accept or decline all, send in bulk) and the notifications above.
+* 🕵️ **Profiles & Blocking:** Full profile lookup, with Add friend / Message / Join / Follow. **Block and Unblock** on your real Roblox account, with a Blocked users list.
+* 💬 **Chat & Messages:** Roblox chat with unread badges, hide chats from specific people, inbox/sent/archive messages, and account privacy toggles.
+* 🔒 **Private Servers:** Save and label links, list and join servers you own or rent (each shows which game it is for), create new ones and manage them.
+* ⚙️ **Tweaks & Mods:**
+  * Fast flags: MSAA, texture quality, display scaling, FPS cap, lighting technology, graphics level, no shadows, no post-processing, no grass, plus a full **Fast Flag editor** with import/export.
+  * Mods: **old "oof" death sound**, old avatar background, old character sounds, 2006 / 2013 cursors, emoji fonts, custom font, and a custom file overlay for anything under `content/`.
+* 🛠 **Sober Settings:** Edit Sober's own options and fast flags, update Sober, force-quit it, open its config folder, and pick launch-command presets (GameMode, dedicated GPU).
+* 📊 **Playtime Analytics:** Total, daily and per-game playtime, a 14-day chart, play streak, longest sessions, and CSV export.
 * 📚 **Library:** Favorites, collections, history, per-game notes, hidden games, and a "Surprise me" button.
-* 🎨 **Style & CSS:** Color presets (Roblox Dark/Light, Amoled, Rose, Sunset, Ocean, Forest, Purple, Mono), accent/radius/font/tile-size controls, compact mode, and live custom CSS.
-* ⌨️ **Quick-jump palette:** Press `Ctrl+K` to jump to any tab, or paste a game link or ID.
+* 🎨 **Style & CSS:** Presets (Roblox Dark/Light, Amoled, Rose, Sunset, Ocean, Forest, Purple, Mono), accent/radius/font/tile-size controls, compact mode and live custom CSS.
+* ⌨️ **Quick-jump palette:** `Ctrl+K` jumps to any tab or game, or paste a link or ID. `/` focuses search, right-click menus work on games, friends and chats.
+* 🔄 **Auto-update:** Checks GitHub on start and every 6 hours, verifies the download, installs it, keeps the old file as `sober_hub.py.bak` and shows what's new. Turn it off in Hub Settings or run with `--no-update`.
+* 🛒 **Catalog:** Opens roblox.com/catalog in your browser.
 
 ## 📋 Prerequisites
 
@@ -41,13 +88,14 @@
   pip install -r requirements.txt
   ```
   If pywebview is installed but has no GUI backend, Sober Hub falls back to the browser window automatically.
+* *(Optional)* `notify-send` (libnotify) for desktop notifications while the hub is in the background.
 
 ## 🚀 Quick Start
 
 1. Get the code:
    ```bash
-   git clone https://github.com/your-username/sober-hub.git
-   cd sober-hub
+   git clone https://github.com/Phsyt/Sober-hub-.git
+   cd Sober-hub-
    ```
 
 2. Run it:
@@ -56,7 +104,7 @@
    ```
    * With pywebview installed it opens as a native window.
    * Otherwise it opens an app window in Brave, Chromium, Chrome or Edge (whichever it finds first), or your default browser.
-   * Add `--browser` to force the browser window.
+   * Add `--browser` to force the browser window, or `--no-update` to skip the update check.
 
 3. *(Optional)* Add a desktop shortcut:
    ```bash
@@ -64,7 +112,11 @@
    ```
    This writes a launcher and icon to `~/.local/share/`, so Sober Hub appears in your app menu. If you move the script, run this again.
 
-4. *(Optional)* Open **🔗 Hub Login** and paste your `.ROBLOSECURITY` cookie to unlock friends, chat, avatar, catalog and messages. Without it you can still use the launcher, discovery, tweaks, playtime stats and public profile lookups.
+4. *(Optional)* Open **🔗 Hub Login** to unlock friends, chat, avatar, private servers and messages. Without it you can still use the launcher, discovery, tweaks, playtime stats and public profile lookups.
+   * **Quick Login (recommended):** the hub shows a code, you confirm it on `roblox.com/crossdevicelogin/ConfirmCode` while logged in there. No password or cookie is typed into the hub.
+   * **Cookie:** paste your `.ROBLOSECURITY` cookie.
+
+> Playing still uses Sober's own login. Open Sober once and sign in there.
 
 ## 💎 Recommendations
 
@@ -113,7 +165,9 @@ Sober Hub serves images (png, jpg, gif, webp, svg, bmp) from your home folder. I
 
 ## 🧩 Tweaks & Mods notes
 
-* Changes are written to Sober's `config.json` (fast flags) or its asset overlay folder (mods). **Fully close and reopen Sober to apply them.**
+* Changes are written to Sober's `config.json` (fast flags) or its asset overlay folder (mods). The hub offers to **close Sober first** so your change isn't overwritten, and you need to **start Sober again to apply it**.
+* **Death sound:** turn on **Old "oof" death sound** (Sober's built-in switch) first. The custom file option installs your own `.ogg` / `.mp3` under every file name Roblox has used for it.
+* Mod presets are downloaded from GitHub into Sober's asset overlay. Nothing else is fetched and your cookie is never sent.
 * The hub keeps Sober's comment header in `config.json` and saves a one-time backup next to it as `config.json.hub.bak`.
 * Roblox changes its fast flags often, and Sober may ignore flags it does not allow. A tweak that does nothing is usually the flag's fault.
 
@@ -123,21 +177,29 @@ Sober Hub serves images (png, jpg, gif, webp, svg, bmp) from your home folder. I
 * **Local storage:** Data lives in `~/.config/sober-hub/data.json` with `0600` permissions. Sober's own config is edited in place.
 * **Your cookie:**
   * It is stored locally, in plain text in `data.json`, and sent **only** to `*.roblox.com`.
-  * It is never sent to Rolimons, to your custom recommendations API, or to the UI, and it is excluded from backups and imports.
+  * It is never sent to Rolimons, GitHub, your custom recommendations API, or the UI, and it is excluded from backups and imports.
   * Redirects are never followed, so a redirect cannot carry the cookie to another host.
   * Use **Hub Login → Disconnect** to remove it, or revoke it by logging out on roblox.com.
+* **No telemetry:** The only outside services contacted are Roblox, the Rolimons game list, GitHub (updates and mod files) and, if you set one, your own API.
 * **Custom API headers** (which may contain a key) are stored in `data.json` and left out of exported backups.
-* **Purchases:** Buying always asks for confirmation first. It spends real Robux, so double-check the price.
+* **Auto-update:** Downloads are syntax-checked before they replace the file, and the previous version is kept as `sober_hub.py.bak`. Disable it in Hub Settings if you prefer to update by hand.
+* **Purchases and private servers:** Anything that can spend Robux asks for confirmation first. Double-check the price.
 
 ## ⚠️ Known limitations
 
 * Sober Hub relies on Roblox web APIs that can change or be rate-limited without notice. If a feature breaks, the toast usually shows Roblox's own error message, so please include it when you open an issue.
+* **Block / Unblock:** Roblox sometimes asks for an extra verification check that the hub can't complete. When that happens the hub opens roblox.com so you can finish it there.
 * Bundle wearing, outfit wearing and body scales depend on Roblox accepting the request. Items that are off-sale or not owned may be skipped.
-* Wardrobe → Bundles uses a Roblox endpoint that may not be available for every account.
+* Rejoin last server after a plain Play needs a connected account, because the hub reads your presence to find the server.
+* Mods are read when Sober starts, so restart it after changing one.
 
 ## 🤝 Contributing
 
-Everything lives in `sober_hub.py`: a Python backend at the top and the HTML/CSS/JS interface in the `HTML` string below it. Backend routes are the entries of the `R` dict, and pages are functions in `PAGES`. The file header documents the layout. Bug reports and pull requests are welcome.
+Everything lives in `sober_hub.py`: a Python backend at the top and the HTML/CSS/JS interface in the `HTML` string below it. Backend routes are the entries of the `R` dict, and pages are functions in `PAGES`. The file header documents the layout. Bug reports and pull requests are welcome. To publish an update, bump `VERSION` and edit `WHATS_NEW`.
+
+## 🤖 Made with Claude AI
+
+Sober Hub was built with [Claude](https://claude.ai) (Anthropic's AI) and tested by a human. Please be kind, and constructive feedback is always welcome.
 
 ## 📜 License
 
