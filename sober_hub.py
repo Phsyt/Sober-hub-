@@ -31,20 +31,15 @@ import ast, base64, json, math, os, re, shlex, sys, shutil, subprocess, threadin
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-VERSION = "5.2.0"   # bump this and push the file to GitHub to roll out an update
+VERSION = "5.4.0"   # bump this and push the file to GitHub to roll out an update
 WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release
-    "Friend notifications rebuilt: animated pop-up cards with avatar, game icon, sound and a Join button (pinned friends or everyone, plus a Test button in Hub Settings)",
-    "Desktop alerts now also go through your system (notify-send) so they show up even when the hub is in the background",
-    "New Avatar editor: live render with Full / Bust / Head views, category tabs, instant wear/remove, Undo, outfits and bundles",
-    "Catalog search fixed (no more 'invalid argument') and buying is more reliable",
-    "Games started from the hub now close back to Sober Hub instead of Sober's home screen (switch in Hub Settings)",
-    "Pressing Play now lets you rejoin your old server: the hub remembers which server you landed in, so Rejoin last server / Last server works even when you started with plain Play (needs a connected account)",
-    "Private servers you own or rent now have a Join button on the Private Servers tab, and each one shows which game it is for",
-    "Profile lookup now loads the whole profile: online status, avatar, about, past usernames, social links, Roblox badges, what they are wearing, groups, friends, created and favorite experiences and recent badges",
-    "Profile lookup no longer shows Add friend for people you are already friends with (it shows Friends, Request sent or Accept request instead, plus a Message button)",
-    "Block now blocks the person on your real Roblox account (not just in Sober Hub), with an Unblock button on their profile and a Blocked users list on the Profile tab",
-    "The in-app Catalog (which kept failing with 'invalid argument') is gone: the Catalog tab now opens roblox.com/catalog in your browser",
-    "Online, in-game and pinned friends get their usernames looked up first (with retries and a saved name cache), so Home no longer shows them as User (id)",
+    "Block / Unblock rebuilt: the hub now talks to Roblox with browser-like headers and tries every known endpoint, so the 403 error is fixed for most accounts. If Roblox still refuses (for example it asks for a verification check) you are sent straight to roblox.com to finish it",
+    "Blocked users list loads reliably again (no more 403 on the Profile and Roblox Settings tabs)",
+    "Death sound fixed: new 'Old oof death sound' switch under Tweaks & Mods uses Sober's own setting, and a custom death sound file is now installed under every file name Roblox uses for it",
+    "Tweaks & Mods: MSAA, texture quality, display scaling, old avatar background, old character sounds, 2006/2013 cursors, emoji fonts, custom font and a Fast Flag editor (Sober is closed first so your changes are not overwritten)",
+    "Friend notifications: animated pop-up cards with avatar, game icon, sound and a Join button, plus desktop alerts through your system",
+    "Avatar editor with live render, outfits and bundles; Profile lookup shows the whole profile",
+    "Games started from the hub close back to Sober Hub, and Rejoin last server works even after a plain Play",
 ]
 REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
 ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
@@ -118,7 +113,7 @@ class _NR(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k): return None   # a redirect could carry the cookie to another host, so none are followed
 OP = urllib.request.build_opener(_NR)
 
-def req(url, body=None, method=None, timeout=12):
+def req(url, body=None, method=None, timeout=12, ref=None):
     """Call a JSON API and return the parsed body. The session cookie is attached only to *.roblox.com URLs; a 403 is retried once
     with the x-csrf-token Roblox returns. Failures raise Exception(<Roblox's own error message>)."""
     host = urllib.parse.urlparse(url).hostname or ""
@@ -126,6 +121,7 @@ def req(url, body=None, method=None, timeout=12):
     def go(tok=None):
         h = {"User-Agent": "SoberHub", "Content-Type": "application/json"}
         if ck: h["Cookie"] = ".ROBLOSECURITY=" + ck
+        if ck and (ref or host in ("apis.roblox.com", "accountsettings.roblox.com")): h["Origin"] = "https://www.roblox.com"; h["Referer"] = ref or "https://www.roblox.com/"
         if tok: h["x-csrf-token"] = tok
         r = urllib.request.Request(url, headers=h, method=method, data=json.dumps(body).encode() if body is not None else None)
         t = OP.open(r, timeout=timeout).read()
@@ -141,8 +137,39 @@ def req(url, body=None, method=None, timeout=12):
             j = json.loads(e.read()); er = j.get("errors")
             m = (er[0].get("message") if er else None) or j.get("message") or j.get("errorMsg") or j.get("reason") or j.get("title")
         except Exception: pass
+        if e.code == 403 and e.headers.get("rblx-challenge-id"): m = "Roblox wants a verification challenge for this action (HTTP 403)"
         m = m or f"Roblox returned HTTP {e.code}"
         raise Exception(m)
+
+def block(a):
+    """Block or unblock a user on the real Roblox account. Tries each known endpoint with browser-like headers (Origin + the person's profile as Referer)
+    and a fresh CSRF token; the UI sends the person to roblox.com if Roblox still refuses (for example when it asks for a verification challenge)."""
+    i, on = int(a["id"]), bool(a.get("on", True)); ref = f"https://www.roblox.com/users/{i}/profile"; errs = []
+    for url in (f"https://apis.roblox.com/user-blocking-api/v1/users/{i}/" + ("block-user" if on else "unblock-user"),
+                f"https://accountsettings.roblox.com/v1/users/{i}/" + ("block" if on else "unblock")):
+        try: req(url, {}, "POST", ref=ref); return {"ok": True}
+        except Exception as e:
+            if str(e) not in errs: errs.append(str(e))
+    raise Exception(errs[0] if len(errs) == 1 else " / ".join(errs))
+
+def blocked(a):
+    """The accounts you have blocked, as [{id, name, display}]. Tries the newer endpoint and the older detailed one, both with browser-like headers."""
+    ref = "https://www.roblox.com/my/account"; errs = []
+    try:
+        r = req("https://accountsettings.roblox.com/v1/users/get-detailed-blocked-users", ref=ref)
+        l = r.get("blockedUsers")
+        if isinstance(l, list): return [{"id": x["userId"], "name": x.get("name") or "", "display": x.get("displayName") or x.get("name") or ""} for x in l if x.get("userId")]
+    except Exception as e: errs.append(str(e))
+    ids, cur = [], ""
+    try:
+        for _ in range(40):
+            r = req("https://apis.roblox.com/user-blocking-api/v1/users/get-blocked-users?count=50" + (f"&cursor={urllib.parse.quote(cur)}" if cur else ""), ref=ref)
+            d = r.get("data") or r; l = d.get("blockedUserIds") or []; ids += l; cur = d.get("cursor") or d.get("nextPageCursor")
+            if not cur or not l: break
+    except Exception as e:
+        if not ids: raise Exception(errs[0] if errs and errs[0] != str(e) else str(e))
+    res = resolve(ids)
+    return [{"id": i, "name": (res.get(i) or ("", ""))[0], "display": (res.get(i) or ("", ""))[1] or "User " + str(i)} for i in ids]
 
 def thumbs(kind, ids, size="150x150"):
     """Batch thumbnail lookup (100 ids per request) -> {targetId: imageUrl}. kind is e.g. 'users/avatar-headshot' or 'games/icons'."""
@@ -890,10 +917,14 @@ def sober_set(a):
             for x in v: cfg.get("fflags", {}).pop(x, None)
         else: cfg[k] = v
     cfg_write(cfg, head)
+    try:   # read it back: confirms the change really reached disk
+        chk = cfg_read()[0]; ff = a.get("fflags") or {}
+        verified = all(chk.get("fflags", {}).get(k) == v for k, v in ff.items()) and not any(k in chk.get("fflags", {}) for k in a.get("fflag_del") or [])
+    except Exception: verified = False
     running = False
     try: running = APP in _run(["flatpak", "ps", "--columns=application"]).stdout
     except Exception: pass
-    return {"ok": True, "running": running}
+    return {"ok": True, "running": running, "verified": verified}
 
 def sober_update(_):
     p = _run(["flatpak", "update", "-y", APP], 900)
@@ -996,39 +1027,150 @@ def _ovl(rel):
     if not full.startswith(os.path.realpath(OVL) + os.sep): raise Exception("Bad path")
     return full
 
+MRAW = "https://raw.githubusercontent.com/bloxstraplabs/bloxstrap/main/Bloxstrap/Resources/Mods/"   # mod preset files
+EMJ = "https://github.com/bloxstraplabs/rbxcustom-fontemojis/releases/download/my-phone-is-78-percent/"   # emoji font files
+_CUR = "content/textures/Cursors/KeyboardMouse/"
+_SND = "content/sounds/"
+MODP = {   # preset id -> {path inside the overlay: download url}, downloaded from GitHub
+    "avatar_bg": {"ExtraContent/places/Mobile.rbxl": MRAW + "OldAvatarBackground.rbxl"},
+    "old_sounds": {_SND + "action_footsteps_plastic.mp3": MRAW + "Sounds/OldWalk.mp3", _SND + "action_jump.mp3": MRAW + "Sounds/OldJump.mp3",
+                   _SND + "action_get_up.mp3": MRAW + "Sounds/OldGetUp.mp3", _SND + "action_falling.mp3": MRAW + "Sounds/Empty.mp3",
+                   _SND + "action_jump_land.mp3": MRAW + "Sounds/Empty.mp3", _SND + "action_swim.mp3": MRAW + "Sounds/Empty.mp3", _SND + "impact_water.mp3": MRAW + "Sounds/Empty.mp3"},
+    "cursor_2013": {_CUR + "ArrowCursor.png": MRAW + "Cursor/From2013/ArrowCursor.png", _CUR + "ArrowFarCursor.png": MRAW + "Cursor/From2013/ArrowFarCursor.png"},
+    "cursor_2006": {_CUR + "ArrowCursor.png": MRAW + "Cursor/From2006/ArrowCursor.png", _CUR + "ArrowFarCursor.png": MRAW + "Cursor/From2006/ArrowFarCursor.png"},
+    "emoji_catmoji": {"content/fonts/TwemojiMozilla.ttf": EMJ + "Catmoji.ttf"},
+    "emoji_win11": {"content/fonts/TwemojiMozilla.ttf": EMJ + "Win1122H2SegoeUIEmoji.ttf"},
+    "emoji_win10": {"content/fonts/TwemojiMozilla.ttf": EMJ + "Win10April2018SegoeUIEmoji.ttf"},
+    "emoji_win8": {"content/fonts/TwemojiMozilla.ttf": EMJ + "Win8.1SegoeUIEmoji.ttf"}}
+MODGROUP = [["cursor_2013", "cursor_2006"], ["emoji_catmoji", "emoji_win11", "emoji_win10", "emoji_win8"]]   # presets that share files: turning one on turns the others off
+MM = D + "/mods.json"   # which presets the hub installed
+FONT_REL = "content/fonts/CustomFont.ttf"
+
+def _mman():
+    try: return json.load(open(MM))
+    except Exception: return {}
+
+def _msave(m):
+    os.makedirs(D, mode=0o700, exist_ok=True)
+    with open(MM, "w") as f: json.dump(m, f)
+
+def _prune(p):
+    """Remove folders left empty after deleting a mod file (never the overlay root)."""
+    d = os.path.dirname(p)
+    while os.path.realpath(d) != os.path.realpath(OVL) and os.path.isdir(d) and not os.listdir(d):
+        os.rmdir(d); d = os.path.dirname(d)
+
+def _rmfile(rel):
+    p = _ovl(rel)
+    if os.path.isfile(p): os.remove(p); _prune(p)
+
+def _dl(url, limit=25 * 1024 * 1024):
+    """Download a mod file. Only GitHub hosts, no cookie is ever sent, redirects (GitHub release assets) are followed."""
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not url.startswith("https://") or host not in ("raw.githubusercontent.com", "github.com"): raise Exception("blocked")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "SoberHub"}), timeout=60) as f: data = f.read(limit + 1)
+    except Exception as e: raise Exception("Could not download the mod from GitHub (" + str(e) + ")")
+    if not data or len(data) > limit: raise Exception("Bad download from GitHub")
+    return data
+
 def mods_list(_a):
     out = []
     for root, _dirs, files in os.walk(OVL):
         for f in files:
             p = os.path.join(root, f); out.append({"path": os.path.relpath(p, OVL), "size": os.path.getsize(p)})
-    return {"dir": OVL, "files": sorted(out, key=lambda x: x["path"])}
+    m = _mman()
+    return {"dir": OVL, "files": sorted(out, key=lambda x: x["path"]),
+            "presets": {k: bool(m.get(k)) and all(os.path.isfile(_ovl(r)) for r in v) for k, v in MODP.items()},
+            "font": os.path.isfile(_ovl(FONT_REL))}
 
-def mods_put(a):
+def mods_preset(a):
+    """Install or remove one mod preset. Everything is downloaded first, so a failed download changes nothing."""
+    pid, on = a["id"], bool(a.get("on", True))
+    if pid not in MODP: raise Exception("Unknown preset")
+    m = _mman()
+    if on:
+        cache = {}
+        blobs = {r: cache.setdefault(u, _dl(u)) for r, u in MODP[pid].items()}
+        for g in MODGROUP:
+            if pid in g:
+                for o in g:
+                    if o != pid:
+                        for r in MODP[o]: _rmfile(r)
+                        m.pop(o, None)
+        for r, data in blobs.items():
+            p = _ovl(r); os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f: f.write(data)
+        m[pid] = 1
+    else:
+        for r in MODP[pid]: _rmfile(r)
+        m.pop(pid, None)
+    _msave(m); return {"ok": True}
+
+def _font_families():
+    """Roblox's font family files, if Sober has them on disk (rewritten so every font uses CustomFont.ttf)."""
+    base, ovl = os.path.dirname(OVL), os.path.realpath(OVL)
+    for root, dirs, _f in os.walk(base):
+        if os.path.realpath(root).startswith(ovl) or root[len(base):].count(os.sep) > 9: dirs[:] = []; continue
+        if root.replace("\\", "/").endswith("content/fonts/families"): return root
+    return None
+
+def mods_font(a):
+    """Custom font mod: installs content/fonts/CustomFont.ttf and points every font family at it."""
+    m = _mman()
+    if a.get("remove"):
+        _rmfile(FONT_REL)
+        for r in m.pop("font_families", []): _rmfile(r)
+        _msave(m); return {"ok": True}
     data = base64.b64decode(a["b64"])
     if len(data) > 25 * 1024 * 1024: raise Exception("File too big (25 MB max)")
-    p = _ovl(a["path"]); os.makedirs(os.path.dirname(p), exist_ok=True)
+    if data[:4] not in (b"\x00\x01\x00\x00", b"OTTO", b"ttcf"): raise Exception("That is not a valid font file (.ttf, .otf or .ttc)")
+    p = _ovl(FONT_REL); os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "wb") as f: f.write(data)
-    return {"ok": True}
+    made, fam = [], _font_families()
+    if fam:
+        for fn in sorted(os.listdir(fam)):
+            if not fn.endswith(".json"): continue
+            rel = "content/fonts/families/" + fn; dst = _ovl(rel)
+            if os.path.exists(dst): continue
+            try:
+                j = json.load(open(os.path.join(fam, fn), encoding="utf-8"))
+                for face in j.get("faces", []): face["assetId"] = "rbxasset://fonts/CustomFont.ttf"
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                with open(dst, "w", encoding="utf-8") as f: json.dump(j, f)
+                made.append(rel)
+            except Exception: pass
+    m["font_families"] = (m.get("font_families") or []) + made; _msave(m)
+    return {"ok": True, "families": len(made)}
+
+def mods_put(a):
+    """Install one uploaded file into the overlay. `path` may list several targets separated by | (the death sound is installed under every name Roblox has used for it)."""
+    data = base64.b64decode(a["b64"])
+    if len(data) > 25 * 1024 * 1024: raise Exception("File too big (25 MB max)")
+    if not data: raise Exception("That file is empty")
+    targets = [x for x in str(a["path"]).split("|") if x.strip()]
+    if any(t.lower().endswith((".ogg", ".mp3")) for t in targets) and not (data[:4] == b"OggS" or data[:3] == b"ID3" or (data[0] == 0xFF and data[1] & 0xE0 == 0xE0)):
+        raise Exception("That is not an .ogg or .mp3 audio file")
+    for t in targets:
+        p = _ovl(t); os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f: f.write(data)
+        if os.path.getsize(p) != len(data): raise Exception("Could not write " + t)
+    return {"ok": True, "files": len(targets)}
 
 def mods_del(a):
-    if a.get("all"): shutil.rmtree(OVL, ignore_errors=True); return {"ok": True}
-    p = _ovl(a["path"])
-    if os.path.isfile(p): os.remove(p)
-    d = os.path.dirname(p)
-    while os.path.realpath(d) != os.path.realpath(OVL) and os.path.isdir(d) and not os.listdir(d):
-        os.rmdir(d); d = os.path.dirname(d)
-    return {"ok": True}
+    if a.get("all"): shutil.rmtree(OVL, ignore_errors=True); _msave({}); return {"ok": True}
+    _rmfile(a["path"]); return {"ok": True}
 
 def mods_dir(_a):
     os.makedirs(OVL, exist_ok=True)
     subprocess.Popen(["xdg-open", OVL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); return {"ok": True}
 
-R = {"state": state, "lastplayed": lastplayed, "open": open_url, "rbx": rbx, "me": me, "game": lambda a: ginfo(a["place"]), "search": search, "servers": servers,
+R = {"block": block, "blocked": blocked, "state": state, "lastplayed": lastplayed, "open": open_url, "rbx": rbx, "me": me, "game": lambda a: ginfo(a["place"]), "search": search, "servers": servers,
      "user": user, "connect": connect, "ql_start": ql_start, "ql_poll": ql_poll, "ql_cancel": ql_cancel,
      "upd_status": upd_status, "upd_check": upd_check, "upd_ack": upd_ack, "upd_restart": upd_restart, "disconnect": disconnect, "friends": friends, "frequests": frequests, "discover": discover, "capi_test": capi_test, "launch": launch,
      "active": active, "dnotify": dnotify, "focus": lambda a: {"ok": focus_hub()}, "heal": lambda a: heal(a["places"]), "hist_del": hist_del, "sober": sober, "sober_set": sober_set, "sober_update": sober_update,
      "sober_kill": sober_kill, "sober_dir": sober_dir, "save": save, "clear": clear, "import": imp,
-     "mods_list": mods_list, "mods_put": mods_put, "mods_del": mods_del, "mods_dir": mods_dir}
+     "mods_list": mods_list, "mods_preset": mods_preset, "mods_font": mods_font, "mods_put": mods_put, "mods_del": mods_del, "mods_dir": mods_dir}
 
 class H(BaseHTTPRequestHandler):
     """Serves the UI at /, local images at /local and JSON routes at /api/<name> (GET: query string, POST: JSON body)."""
@@ -1569,46 +1711,83 @@ async function delOutfit(i){const o=OL[i];if(!o)return;if(!await ask(`Delete out
  const r=await rb(AVU+`outfits/${o.id}/delete`,{});if(r.error)return toast(r.error,5000);toast('Outfit deleted');avTab()}
 async function skin(c){const b={};['head','torso','rightArm','leftArm','rightLeg','leftLeg'].forEach(x=>b[x+'ColorId']=c);avBusy(1);avResult(await rb(AVU+'avatar/set-body-colors',b),'Skin tone set')}
 const redraw=async()=>{avBusy(1);await rb(AVU+'redraw-thumbnail',{});toast('Re-rendering...');setTimeout(bust,2500)};
-// ---- tweaks & mods (Bloxstrap-style)
+// ---- tweaks & mods
+// Roblox now only honours a short allow-list of Fast Flags, so only a few current presets are offered;
+// the older flags are kept under "Legacy" and may be silently ignored.
+const MSAA=[['Automatic',''],['1x',1],['2x',2],['4x',4]];
+const TEXQ=[['Automatic',''],['Lowest (0)',0],['Low (1)',1],['Medium (2)',2],['High (3)',3]];
 const FFP=[
  ['Disable shadows','Big FPS gain, flatter look',{FIntRenderShadowIntensity:0}],
  ['Disable post-processing','Turns off bloom, blur and sun rays',{FFlagDisablePostFx:true}],
  ['Remove grass','Less terrain clutter',{FIntFRMMinGrassDistance:0,FIntFRMMaxGrassDistance:0,FIntRenderGrassDetailStrands:0}]];
 const LIGHT=[['Default',null],['Voxel (fast, old style)','DFFlagDebugRenderForceTechnologyVoxel'],['Shadow map','FFlagDebugForceFutureIsBrightPhase2'],['Future (best looking)','FFlagDebugForceFutureIsBrightPhase3']];
-const MODSLOTS=[['Death sound (.ogg)','content/sounds/ouch.ogg'],['Arrow cursor (.png)','content/textures/Cursors/KeyboardMouse/ArrowCursor.png'],['Far cursor (.png)','content/textures/Cursors/KeyboardMouse/ArrowFarCursor.png']];
-let MODF=[];
-const ffApply=(del,set)=>api('sober_set',{fflag_del:del||[],fflags:set||{}}).then(r=>{toast(r.error||(r.running?'Saved - Sober is running, close it fully and reopen it to apply':'Saved - start Sober to apply'),5000);go('tweaks')});
+const MODSLOTS=[['Custom death sound (.ogg)','content/sounds/ouch.ogg|content/sounds/uuhhh.mp3'],['Arrow cursor (.png)','content/textures/Cursors/KeyboardMouse/ArrowCursor.png'],['Far cursor (.png)','content/textures/Cursors/KeyboardMouse/ArrowFarCursor.png']];
+const CURS=['cursor_2013','cursor_2006'],EMOJ=['emoji_catmoji','emoji_win11','emoji_win10','emoji_win8'];
+let MODF=[],MODP={},MODFONT=false,SOBK=[];
+// Sober rewrites config.json when it closes, so a running Sober can undo the change: offer to close it first.
+async function ffApply(del,set){const s0=await api('sober');if(s0&&s0.running){if(!await ask('Sober is running and can overwrite this change when it closes. Close Sober now and apply?',{ok:'Close Sober & apply',title:'Sober is running'}))return go('tweaks');await api('sober_kill',{});await new Promise(r=>setTimeout(r,1500))}
+ const r=await api('sober_set',{fflag_del:del||[],fflags:set||{}});toast(r.error||(r.verified===false?'Saved, but Sober\'s config did not keep it - check the file permissions':'Saved - start Sober to apply'),5000);go('tweaks')}
+async function soberFlag(k,on){const s0=await api('sober');if(s0&&s0.running){if(!await ask('Sober is running and can overwrite this change when it closes. Close Sober now and apply?',{ok:'Close Sober & apply',title:'Sober is running'}))return go('tweaks');await api('sober_kill',{});await new Promise(r=>setTimeout(r,1500))}
+ const r=await api('sober_set',{[k]:on});toast(r.error||'Saved - start Sober to apply',4000);go('tweaks')}
+const ffBool=(k,on,v)=>on?ffApply([],{[k]:v}):ffApply([k],{});
 const ffTog=i=>{const f=FFP[i][2],on=Object.entries(f).every(([k,v])=>SOB[k]===v);on?ffApply(Object.keys(f),{}):ffApply([],f)};
 const ffLight=v=>ffApply(LIGHT.map(x=>x[1]).filter(Boolean),v?{[v]:true}:{});
 const ffFps=v=>v?ffApply([],{DFIntTaskSchedulerTargetFps:+v}):ffApply(['DFIntTaskSchedulerTargetFps'],{});
 const ffTex=v=>v===''?ffApply(['DFFlagTextureQualityOverrideEnabled','DFIntTextureQualityOverride'],{}):ffApply([],{DFFlagTextureQualityOverrideEnabled:true,DFIntTextureQualityOverride:+v});
+const ffMsaa=v=>v===''?ffApply(['FIntDebugForceMSAASamples'],{}):ffApply([],{FIntDebugForceMSAASamples:+v});
 const ffGfx=v=>v===''?ffApply(['DFIntDebugFRMQualityLevelOverride'],{}):ffApply([],{DFIntDebugFRMQualityLevelOverride:+v});
+const ffDel2=i=>SOBK[i]&&ffApply([SOBK[i]],{});
+function ffAdd2(){const k=$('#ffk2').value.trim();if(!k)return toast('Enter a flag name');ffApply([],{[k]:pv($('#ffv2').value.trim())})}
 async function ffImport(){let o;try{o=JSON.parse($('#ffj').value)}catch(e){return toast('That is not valid JSON')}
  if(!o||typeof o!='object'||Array.isArray(o))return toast('Expected a JSON object like {"FlagName": value}');
  const n={};for(const k in o){let v=o[k];if(typeof v=='string')v=pv(v);if(v!==null&&typeof v=='object')return toast('Flag '+k+' has an unsupported value');n[k]=v}
  ffApply([],n)}
 const ffExport=()=>dl('sober-fflags.json',JSON.stringify(SOB,null,2),'application/json');
-async function ffClear(){if(!await ask('Remove ALL Fast Flags from Sober?',{ok:'Remove all',danger:1,title:'Clear Fast Flags'}))return;ffApply(Object.keys(SOB),{})}
+async function ffClear(){if(!await ask('Remove ALL Fast Flags from Sober? ',{ok:'Remove all',danger:1,title:'Reset Fast Flags'}))return;ffApply(Object.keys(SOB),{})}
+async function modSet(id,on){toast(on?'Downloading from GitHub…':'Removing…',60000);const x=await api('mods_preset',{id,on});toast(x.error||(on?'Installed - restart Sober to apply':'Removed'),5000);go('tweaks')}
+const modGroup=(ids,v)=>v?modSet(v,true):(ids.find(i=>MODP[i])?modSet(ids.find(i=>MODP[i]),false):go('tweaks'));
+function modFont(){const inp=document.createElement('input');inp.type='file';inp.accept='.ttf,.otf,.ttc';
+ inp.onchange=()=>{const f=inp.files[0];if(!f)return;if(f.size>25e6)return toast('File too big (25 MB max)');const rd=new FileReader();
+  rd.onload=async()=>{toast('Installing font…',60000);const x=await api('mods_font',{b64:String(rd.result).split(',')[1]});
+   toast(x.error||(x.families?'Font installed for '+x.families+' font families - restart Sober to apply':'Font file installed, but Sober\'s font family files were not found on disk, so Roblox may ignore it'),8000);go('tweaks')};rd.readAsDataURL(f)};inp.click()}
+async function modFontDel(){const x=await api('mods_font',{remove:1});toast(x.error||'Custom font removed');go('tweaks')}
 function modPick(i){const slot=i>=0?MODSLOTS[i][1]:null,inp=document.createElement('input');inp.type='file';
  inp.onchange=()=>{const f=inp.files[0];if(!f)return;if(f.size>25e6)return toast('File too big (25 MB max)');
   const rd=new FileReader();rd.onload=async()=>{const p=slot||await askText('Path inside Roblox content, e.g. content/sounds/ouch.ogg','content/',{title:'Custom mod path',ok:'Install'});if(!p)return;
    const x=await api('mods_put',{path:p,b64:String(rd.result).split(',')[1]});toast(x.error||'Installed - restart Sober to apply',4000);go('tweaks')};rd.readAsDataURL(f)};inp.click()}
 async function modDel(i){const f=MODF[i];if(!f)return;const x=await api('mods_del',{path:f.path});toast(x.error||'Removed');go('tweaks')}
 async function modAll(){if(!await ask('Remove every installed mod?',{ok:'Remove all',danger:1,title:'Remove mods'}))return;await api('mods_del',{all:1});toast('All mods removed');go('tweaks')}
-Object.assign(PAGES,{async tweaks(){const [s,m]=await Promise.all([api('sober'),api('mods_list')]);const c=s.cfg||{};SOB=c.fflags||{};MODF=m.files||[];
- const sel=(id,opts,cur,fn)=>`<select onchange="${fn}(this.value)">${opts.map(([l,v])=>`<option value="${v}" ${String(v)==String(cur)?'selected':''}>${l}</option>`).join('')}</select>`;
+Object.assign(PAGES,{async tweaks(){const [s,m]=await Promise.all([api('sober'),api('mods_list')]);const c=s.cfg||{};SOB=c.fflags||{};SOBK=Object.keys(SOB);MODF=m.files||[];MODP=m.presets||{};MODFONT=!!m.font;
+ const sel=(opts,cur,fn)=>`<select onchange="${fn}(this.value)">${opts.map(([l,v])=>`<option value="${v}" ${String(v)==String(cur)?'selected':''}>${l}</option>`).join('')}</select>`;
+ const msel=(ids,opts)=>`<select onchange="modGroup(${esc(JSON.stringify(ids))},this.value)">${opts.map(([l,v])=>`<option value="${v}" ${(ids.find(i=>MODP[i])||'')==v?'selected':''}>${l}</option>`).join('')}</select>`;
+ const mchk=(id,l,d)=>`<label style="display:block;margin:8px 0"><input type=checkbox ${MODP[id]?'checked':''} onchange="modSet('${id}',this.checked)"> ${l} <small style="display:inline">- ${d}</small></label>`;
  const lcur=(LIGHT.find(x=>x[1]&&SOB[x[1]]===true)||[0,''])[1]||'';
- return `<h2>Tweaks & Mods</h2><small>Bloxstrap-style extras for Sober. Changes apply the next time Sober starts. Flag names can stop working when Roblox updates.</small>
- <div class=card><b>Performance & graphics</b>
-  <div class=row style="margin-top:8px"><span style="width:200px">Frame rate cap</span>${sel('f',[['Default',''],['30',30],['60',60],['75',75],['120',120],['144',144],['165',165],['240',240],['Unlimited',9999]],SOB.DFIntTaskSchedulerTargetFps||'','ffFps')}</div>
-  <div class=row style="margin-top:6px"><span style="width:200px">Lighting technology</span>${sel('l',LIGHT.map(x=>[x[0],x[1]||'']),lcur,'ffLight')}</div>
-  <div class=row style="margin-top:6px"><span style="width:200px">Texture quality</span>${sel('t',[['Automatic',''],['Lowest',0],['Low',1],['Medium',2],['High',3]],SOB.DFFlagTextureQualityOverrideEnabled?SOB.DFIntTextureQualityOverride:'','ffTex')}</div>
-  <div class=row style="margin-top:6px"><span style="width:200px">Graphics level override</span>${sel('g',[['Automatic',''],['1 (lowest)',1],['3',3],['5',5],['8',8],['10',10],['15',15],['21 (max)',21]],SOB.DFIntDebugFRMQualityLevelOverride||'','ffGfx')}</div>
+ return `<h2>Tweaks & Mods</h2><small>Fast Flags and mods for Sober. Changes apply the next time Sober starts.</small>
+ ${s.running?'<div class=card style="border:1px solid var(--accent)"><b>Sober is running</b><small>Close it before changing anything: Sober can overwrite the config when it exits, and mods are only read at startup.</small><button class="btn alt sm" style="margin-top:8px" onclick="api(\'sober_kill\',{}).then(()=>{toast(\'Sober closed\');go(\'tweaks\')})">Close Sober</button></div>':''}
+ <div class=card><b>Fast Flag tweaks</b><small>Current presets. Roblox ignores flags it does not allow-list, so keep to these for results you can rely on.</small>
+  <div class=row style="margin-top:8px"><span style="width:220px">Anti-aliasing (MSAA)</span>${sel(MSAA,SOB.FIntDebugForceMSAASamples||'','ffMsaa')}</div>
+  <div class=row style="margin-top:6px"><span style="width:220px">Texture quality</span>${sel(TEXQ,SOB.DFFlagTextureQualityOverrideEnabled?SOB.DFIntTextureQualityOverride:'','ffTex')}</div>
+  <label style="display:block;margin:10px 0 4px"><input type=checkbox ${c.bring_back_oof?'checked':''} onchange="soberFlag('bring_back_oof',this.checked)"> Old "oof" death sound <small style="display:inline">- Sober's built-in switch, the most reliable way. Use the custom file below only if you want your own sound</small></label>
+  <label style="display:block;margin:10px 0 4px"><input type=checkbox ${SOB.DFFlagDisableDPIScale===true?'checked':''} onchange="ffBool('DFFlagDisableDPIScale',this.checked,true)"> Fix display scaling <small style="display:inline">- turns off DPI scaling</small></label>
+  <label style="display:block;margin:4px 0"><input type=checkbox ${SOB.FFlagHandleAltEnterFullscreenManually===false?'checked':''} onchange="ffBool('FFlagHandleAltEnterFullscreenManually',this.checked,false)"> Don't handle Alt+Enter fullscreen manually <small style="display:inline">- recommended default</small></label>
+  <div class=row style="margin-top:10px"><button class="btn alt sm" onclick="ffClear()">Reset configuration (remove all flags)</button></div></div>
+ <div class=card><b>Legacy flags</b><small>Popular in older versions. Current Roblox may ignore some or all of these.</small>
+  <div class=row style="margin-top:8px"><span style="width:220px">Frame rate cap</span>${sel([['Default',''],['30',30],['60',60],['75',75],['120',120],['144',144],['165',165],['240',240],['Unlimited',9999]],SOB.DFIntTaskSchedulerTargetFps||'','ffFps')}</div>
+  <div class=row style="margin-top:6px"><span style="width:220px">Lighting technology</span>${sel(LIGHT.map(x=>[x[0],x[1]||'']),lcur,'ffLight')}</div>
+  <div class=row style="margin-top:6px"><span style="width:220px">Graphics level override</span>${sel([['Automatic',''],['1 (lowest)',1],['3',3],['5',5],['8',8],['10',10],['15',15],['21 (max)',21]],SOB.DFIntDebugFRMQualityLevelOverride||'','ffGfx')}</div>
   <div style="margin-top:10px">${FFP.map((p,i)=>`<label style="display:block;margin:6px 0"><input type=checkbox ${Object.entries(p[2]).every(([k,v])=>SOB[k]===v)?'checked':''} onchange="ffTog(${i})"> ${p[0]} <small style="display:inline">- ${p[1]}</small></label>`).join('')}</div></div>
- <div class=card><b>Fast Flag import / export</b><small>Paste a Bloxstrap-style flag list (JSON). Existing flags are kept, matching ones are updated.</small>
-  <textarea id=ffj rows=5 placeholder='{"DFIntTaskSchedulerTargetFps": 144}' style="width:100%;margin-top:8px"></textarea>
-  <div class=row style="margin-top:8px"><button class=btn onclick="ffImport()">Apply</button><button class="btn alt" onclick="ffExport()">Download current flags</button><button class="btn alt" onclick="copy(JSON.stringify(SOB,null,2))">Copy current flags</button><button class="btn alt" onclick="ffClear()">Clear all flags</button></div><small>${Object.keys(SOB).length} flag(s) set right now. Fine-tune single flags in Sober Settings.</small></div>
- <div class=card><b>Mods (asset overlay)</b><small>Replace Roblox's own files inside Sober, like Bloxstrap mods: custom death sound, cursors, anything under content/. Folder: ${esc(m.dir||'')}</small>
+ <div class=card><b>Fast Flag editor</b><small>${SOBK.length} flag(s) set right now. Add, change or remove single flags, or import / export a flag list.</small>
+  <table style="margin-top:8px">${SOBK.map((k,i)=>`<tr><td><code>${esc(k)}</code></td><td><code>${esc(JSON.stringify(SOB[k]))}</code></td><td style="text-align:right"><button class="btn alt sm" onclick="ffDel2(${i})">Remove</button></td></tr>`).join('')||'<tr><td><small>No flags set</small></td></tr>'}</table>
+  <div class=row style="margin-top:8px"><input id=ffk2 placeholder="FlagName" style="flex:1;min-width:200px"><input id=ffv2 placeholder="value (true, 60, text)" style="width:170px"><button class=btn onclick="ffAdd2()">Set flag</button></div>
+  <textarea id=ffj rows=4 placeholder='{"DFIntTaskSchedulerTargetFps": 144}' style="width:100%;margin-top:10px"></textarea>
+  <div class=row style="margin-top:8px"><button class=btn onclick="ffImport()">Import JSON</button><button class="btn alt" onclick="ffExport()">Download flags</button><button class="btn alt" onclick="copy(JSON.stringify(SOB,null,2))">Copy flags</button></div></div>
+ <div class=card><b>Mods</b><small>Mod presets downloaded from GitHub and placed in Sober's asset overlay. Restart Sober to apply.</small>
+  ${mchk('avatar_bg','Old avatar background','the classic avatar editor backdrop')}
+  ${mchk('old_sounds','Old character sounds','classic walk, jump and get-up sounds; swim, fall, land and water sounds muted')}
+  <div class=row style="margin-top:8px"><span style="width:220px">Cursor</span>${msel(CURS,[['Default',''],['2013','cursor_2013'],['2006','cursor_2006']])}</div>
+  <div class=row style="margin-top:6px"><span style="width:220px">Emoji font</span>${msel(EMOJ,[['Default',''],['Catmoji','emoji_catmoji'],['Windows 11','emoji_win11'],['Windows 10','emoji_win10'],['Windows 8.1','emoji_win8']])}</div>
+  <div class=row style="margin-top:6px"><span style="width:220px">Custom font</span>${MODFONT?'<span>✅ Installed</span><button class="btn alt sm" onclick="modFontDel()">Remove</button>':'<button class="btn alt sm" onclick="modFont()">Choose font (.ttf .otf .ttc)</button>'}</div></div>
+ <div class=card><b>Custom files (asset overlay)</b><small>Replace any Roblox file inside Sober, like a modifications folder. Folder: ${esc(m.dir||'')}</small>
   <div class=row style="margin:8px 0">${MODSLOTS.map((x,i)=>`<button class="btn alt sm" onclick="modPick(${i})">${x[0]}</button>`).join('')}<button class="btn alt sm" onclick="modPick(-1)">Custom path...</button><button class="btn alt sm" onclick="api('mods_dir',{})">Open folder</button></div>
   <table>${MODF.map((f,i)=>`<tr><td><code>${esc(f.path)}</code></td><td>${Math.max(1,Math.round(f.size/1024))} KB</td><td style="text-align:right"><button class="btn alt sm" onclick="modDel(${i})">Remove</button></td></tr>`).join('')||'<tr><td><small>No mods installed</small></td></tr>'}</table>${MODF.length?'<button class="btn alt sm" style="margin-top:8px" onclick="modAll()">Remove all mods</button>':''}</div>
  <div class=card><b>Also in Sober Settings</b><small>Discord Rich Presence, server location indicator, close-on-leave, OpenGL, old death sound and launch command presets.</small><button class="btn alt sm" onclick="go('sober')">Open Sober Settings</button></div>`}});
@@ -1660,20 +1839,21 @@ async function buy(i){const x=CAT[i];if(!x)return;
 // ---- blocking (real Roblox account) + profile lookup
 const UB='https://apis.roblox.com/user-blocking-api/v1/';
 let BLK=null,PCUR=null,PNAME={};
-async function blockCall(id,on){let r=await rb(UB+'users/'+id+(on?'/block-user':'/unblock-user'),{});if(r&&r.error)r=await rb('https://accountsettings.roblox.com/v1/users/'+id+(on?'/block':'/unblock'),{});return r||{}}
-async function blkLoad(force){if(BLK&&!force)return BLK;let ids=[],cur='',out=null;
- for(let i=0;i<40;i++){const r=await rb(UB+'users/get-blocked-users?count=50'+(cur?'&cursor='+encodeURIComponent(cur):''));
-  if(r.error){if(i)break;const o=await rb('https://accountsettings.roblox.com/v1/users/get-detailed-blocked-users');if(o.error)return{error:r.error};out=(o.blockedUsers||[]).map(x=>({id:x.userId,name:x.name||'',display:x.displayName||x.name||''}));break}
-  const d=r.data||r,l=d.blockedUserIds||[];ids=ids.concat(l);cur=d.cursor||d.nextPageCursor;if(!cur||!l.length)break}
- if(!out){const nm={};for(let i=0;i<ids.length;i+=100){const u=await rb('https://users.roblox.com/v1/users',{userIds:ids.slice(i,i+100),excludeBannedUsers:false});(u.data||[]).forEach(x=>nm[x.id]=x)}
-  out=ids.map(id=>{const x=nm[id]||{};return{id,name:x.name||'',display:x.displayName||x.name||('User '+id)}})}
- return BLK=out}
+async function blockCall(id,on){return api('block',{id,on})}
+const blkWeb=()=>open_('https://www.roblox.com/my/account#!/privacy');
+async function blkFail(id,on,msg){toast('Roblox refused this from the hub ('+msg+') - opening roblox.com so you can finish it there',7000);open_(on?'https://www.roblox.com/users/'+id+'/profile':'https://www.roblox.com/my/account#!/privacy')}
+async function blkLoad(force){if(BLK&&!force)return BLK;const r=await api('blocked');return BLK=r}
 const blkRows=l=>l.length?l.map(x=>`<div class=row style="margin:6px 0"><span style="flex:1"><b>${esc(x.display||x.name)}</b>${x.name?` <small style="display:inline">@${esc(x.name)}</small>`:''}</span><button class="btn alt sm" onclick="prof(${x.id})">Profile</button><button class="btn alt sm" onclick="unblockU(${x.id})">Unblock</button></div>`).join(''):'<small>You have not blocked anyone</small>';
-async function blkDraw(){const el=$('#pblk');if(!el||!S.connected)return;el.innerHTML='<div class=card><b>🚫 Blocked users</b><small>People you blocked on your Roblox account. Unblock them here.</small><div id=pbl>Loading…</div></div>';const l=await blkLoad(true),e=$('#pbl');if(e)e.innerHTML=l.error?esc(l.error):blkRows(l)}
+async function blkDraw(){const el=$('#pblk');if(!el||!S.connected)return;el.innerHTML='<div class=card><b>🚫 Blocked users</b><small>People you blocked on your Roblox account. Unblock them here.</small><div id=pbl>Loading…</div></div>';const l=await blkLoad(true),e=$('#pbl');if(e)e.innerHTML=l.error?esc(l.error)+'<div class=row style="margin-top:8px"><button class="btn alt sm" onclick="blkDraw()">Retry</button><button class="btn alt sm" onclick="blkWeb()">Open privacy settings on roblox.com</button></div>':blkRows(l)}
 async function blkAfter(){await blkLoad(true);if(tab=='profile'){blkDraw();PCUR&&prof(PCUR)}else if(tab=='rset')rset2()}
-async function blockU(id){const nm=PNAME[id]||'this user';if(!await ask('Block '+nm+' on Roblox?\nThis blocks them on your real Roblox account, not just in Sober Hub. You can unblock them from their profile or from the Blocked users list on the Profile tab.',{ok:'Block',danger:1,title:'Block on Roblox'}))return;const r=await guard(blockCall(id,true),'Blocked on Roblox');if(!r.error)blkAfter()}
-async function unblockU(id){const r=await guard(blockCall(id,false),'Unblocked on Roblox');if(!r.error)blkAfter()}
+async function blockU(id){const nm=PNAME[id]||'this user';if(!await ask('Block '+nm+' on Roblox?\nThis blocks them on your real Roblox account, not just in Sober Hub. You can unblock them from their profile or from the Blocked users list on the Profile tab.',{ok:'Block',danger:1,title:'Block on Roblox'}))return;const r=await blockCall(id,true);if(r.error)return blkFail(id,true,r.error);toast('Blocked on Roblox');blkAfter()}
+async function unblockU(id){const r=await blockCall(id,false);if(r.error)return blkFail(id,false,r.error);toast('Unblocked on Roblox');blkAfter()}
 const hsx=(u,b)=>rb(u,b).catch(()=>({error:'failed'}));
+// /friends stops at 200 people, so the paged /friends/find endpoint fills in the rest (the same approach the Friends tab uses)
+async function allFr(id){const B='https://friends.roblox.com/v1/users/'+id,seen=new Set(),out=[],add=x=>{const i=x.id||x.userId;if(i&&!seen.has(i)){seen.add(i);out.push({id:i,name:x.name||'',displayName:x.displayName||''})}};
+ const a=await hsx(B+'/friends');(a.data||[]).forEach(add);const c=await hsx(B+'/friends/count'),tot=c.count||0;
+ if(out.length<tot||!out.length){let cur='';for(let i=0;i<80;i++){const r=await hsx(B+'/friends/find?limit=50&userSort=1'+(cur?'&cursor='+encodeURIComponent(cur):''));if(r.error)break;(r.PageItems||r.pageItems||r.data||[]).forEach(add);cur=r.NextCursor||r.nextCursor||r.nextPageCursor;if(!cur)break}}
+ return out}
 async function fillUsers(list){const need=list.filter(f=>!(f.name&&f.displayName)).map(f=>f.id),nm={};for(let i=0;i<need.length;i+=100){const u=await rb('https://users.roblox.com/v1/users',{userIds:need.slice(i,i+100),excludeBannedUsers:false});(u.data||[]).forEach(x=>nm[x.id]=x)}
  return list.map(f=>{const x=nm[f.id]||{};return{id:f.id,name:f.name||x.name||'',display:f.displayName||x.displayName||f.name||x.name||('User '+f.id)}})}
 async function thumbMap(kind,ids,q){const m={};for(let i=0;i<ids.length;i+=100){const r=await hsx('https://thumbnails.roblox.com/v1/'+kind+'?'+q+'='+ids.slice(i,i+100).join(',')+'&returnPolicy=PlaceHolder&size=150x150&format=Png');(r.data||[]).forEach(x=>m[x.targetId]=x.imageUrl)}return m}
@@ -1688,7 +1868,7 @@ async function prof(pid){const box=$('#pf');if(!box)return;box.innerHTML='Lookin
   hsx('https://thumbnails.roblox.com/v1/users/avatar?userIds='+id+'&size=420x420&format=Png'),
   hsx(U+'/username-history?limit=25&sortOrder=Desc'),
   hsx('https://groups.roblox.com/v2/users/'+id+'/groups/roles'),
-  hsx(F+'/friends'),
+  allFr(id),
   hsx('https://games.roblox.com/v2/users/'+id+'/games?accessFilter=Public&limit=12&sortOrder=Desc'),
   hsx('https://games.roblox.com/v2/users/'+id+'/favorite/games?accessFilter=2&limit=12&sortOrder=Desc'),
   hsx('https://avatar.roblox.com/v1/users/'+id+'/avatar'),
@@ -1699,7 +1879,7 @@ async function prof(pid){const box=$('#pf');if(!box)return;box.innerHTML='Lookin
   S.connected&&!me?blkLoad():[]]);
  if(i.error||!i.name)return box.innerHTML=esc(i.error||'User not found');
  PNAME[id]=i.displayName||i.name;const pu=$('#pu');if(pu)pu.value=i.name;
- const frl=await fillUsers((fl.data||[]).map(x=>({id:x.id,name:x.name,displayName:x.displayName})));
+ const frl=await fillUsers(Array.isArray(fl)?fl:[]);
  const exp=(cg.data||[]).filter(x=>x.rootPlace&&x.rootPlace.id),fav=(fg.data||[]).filter(x=>x.rootPlace&&x.rootPlace.id),wa=(wr.assets||[]);
  const [fth,gth,ath]=await Promise.all([thumbMap('users/avatar-headshot',frl.map(f=>f.id),'userIds'),thumbMap('games/icons',[...new Set([...exp,...fav].map(x=>x.id))],'universeIds'),thumbMap('assets',wa.map(a=>a.id),'assetIds')]);
  const p=((pr.userPresences||[])[0])||{},stt=((st.data||[])[0]||{}).status||'',isF=!!(S.connected&&!me&&(stt=='Friends'||FR.some(f=>f.id==id))),isB=Array.isArray(bl)&&bl.some(x=>x.id==id);
@@ -1723,7 +1903,7 @@ async function prof(pid){const box=$('#pf');if(!box)return;box.innerHTML='Lookin
  +psec('Experiences made by '+esc(i.displayName)+' ('+exp.length+')',exp.length?`<div class=rs>${exp.map(x=>tile({place:x.rootPlace.id,name:x.name,icon:gth[x.id]},(x.placeVisits||0).toLocaleString()+' visits')).join('')}</div>`:'')
  +psec('Favorite experiences',fav.length?`<div class=rs>${fav.map(x=>tile({place:x.rootPlace.id,name:x.name,icon:gth[x.id]},'')).join('')}</div>`:'')
  +psec('Groups ('+(gr.data||[]).length+')',(gr.data||[]).length?`<table>${gr.data.map(x=>`<tr><td><b>${esc((x.group||{}).name)}</b>${(x.group||{}).hasVerifiedBadge?' ✔':''}<small style="margin:0">${esc((x.role||{}).name||'')}</small></td><td style="text-align:right"><small style="margin:0">${((x.group||{}).memberCount||0).toLocaleString()} members</small></td><td style="text-align:right"><button class="btn alt sm" onclick="open_('https://www.roblox.com/groups/${(x.group||{}).id}')">Open</button></td></tr>`).join('')}</table>`:'')
- +psec('Friends ('+frl.length+')',frl.length?`<div style="display:flex;flex-wrap:wrap;gap:12px;max-height:320px;overflow:auto">${frl.map(f=>`<div class=fr onclick="prof(${f.id})" title="@${esc(f.name)}"><div class=ava><img loading=lazy src="${esc(fth[f.id]||'')}"></div><b>${esc(f.display)}</b><small>@${esc(f.name)}</small></div>`).join('')}</div>`:'')
+ +psec('Friends ('+frl.length+(fc.count>frl.length?' of '+fc.count:'')+')',frl.length?`<div style="display:flex;flex-wrap:wrap;gap:12px;max-height:320px;overflow:auto">${frl.map(f=>`<div class=fr onclick="prof(${f.id})" title="@${esc(f.name)}"><div class=ava><img loading=lazy src="${esc(fth[f.id]||'')}"></div><b>${esc(f.display)}</b><small>@${esc(f.name)}</small></div>`).join('')}</div>`:'')
  +((bd.data||[]).length?psec('Recent badges',`<small>${bd.data.map(x=>esc(x.name)).join(' · ')}</small>`):'')}
 // ---- roblox settings
 const PRIV=[['Who can chat with me (app)','app-chat-privacy','appChatPrivacy',['NoOne','Friends','Everyone']],['Who can chat with me (in experience)','game-chat-privacy','gameChatPrivacy',['NoOne','Friends','Everyone']],['Who can see my inventory','inventory-privacy','inventoryPrivacy',['NoOne','Friends','FriendsAndFollowing','AllUsers']]];
