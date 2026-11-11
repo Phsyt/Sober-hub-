@@ -41,21 +41,280 @@
 | 🛡️ **Private by design** | Local only, no analytics, no cloud. Log in with **Quick Login** so no password or cookie has to be typed. |
 
 ### How it compares
+# How it compares
 
-| | Roblox in a browser | Sober on its own | **Sober Hub** |
+**Sober Hub v5.6.0** vs. Roblox in a browser vs. **Sober on its own**. Sober is a Linux runtime for the **Roblox Android app**, so the "Sober on its own" column is what the Roblox Android app gives you. Every feature in the hub is listed, and Party is not included.
+
+Legend: ✅ yes · ❌ no · 🟡 partly / manual (see note)
+
+---
+
+## Core (the headline features)
+
+| | Roblox in a browser | Sober on its own (Roblox Android app) | **Sober Hub** |
 |---|:-:|:-:|:-:|
 | Launch games in Sober | ✅ | ✅ | ✅ |
-| Friends online + one-click join | ✅ | ❌ | ✅ |
+| Friends online + one-click join | ✅ | ✅ | ✅ |
 | Live pop-up + desktop friend alerts | ❌ | ❌ | ✅ |
 | Rejoin last server (even after plain Play) | ❌ | ❌ | ✅ |
 | Returns to the launcher when you leave a game | ❌ | ❌ | ✅ |
-| Avatar editor with outfits and undo | ✅ | ❌ | ✅ |
-| Private server manager | ✅ | ❌ | ✅ |
-| Fast Flag editor + mods with safe apply | ❌ | manual file edit | ✅ |
+| Avatar editor with outfits and undo | ✅ (no undo) | ✅ (no undo) | ✅ |
+| Private server manager | ✅ | 🟡 join, limited management | ✅ |
+| Fast Flag editor + mods with safe apply | ❌ | 🟡 manual file edit | ✅ |
 | Local playtime stats and streaks | ❌ | ❌ | ✅ |
 | Custom recommendations API | ❌ | ❌ | ✅ |
 | Custom themes and CSS | ❌ | ❌ | ✅ |
 
+---
+
+## Launching & Games
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Quick launch from a pasted `roblox.com/games` link, `roblox://` link or place ID | 🟡 via the site | 🟡 only through a link opened from outside | ✅ |
+| Private-server links accepted by quick launch | ✅ | 🟡 only through a link opened from outside | ✅ |
+| Game search | ✅ | ✅ | ✅ |
+| 🎲 Surprise me (random game from recommendations) | ❌ | ❌ | ✅ |
+| 🎲 Random favorite | ❌ | ❌ | ✅ |
+| Game page: rating, playing, visits, favorites, creator, description | ✅ | ✅ | ✅ |
+| 👍 / 👎 vote and favorite on Roblox | ✅ | ✅ | ✅ |
+| Copy game link / copy `roblox://` launch link | 🟡 link only | 🟡 share link only | ✅ |
+| Open game on roblox.com | n/a | ❌ | ✅ |
+| Friends playing this game, with one-click join | ✅ | ✅ | ✅ |
+| Per-game private notes | ❌ | ❌ | ✅ |
+| Public server browser (emptiest, fullest, best ping, load more) | 🟡 basic list | ❌ | ✅ |
+| 🎲 Random public server | ❌ | ❌ | ✅ |
+| 🔀 Server hop (skips recent, full and empty servers, prefers low ping) | ❌ | ❌ | ✅ |
+| Rejoin the last server of any game | ❌ | ❌ | ✅ |
+| Roblox "Continue" list shown on Home | ✅ | ✅ | ✅ |
+| Hero card to jump back into your last game | ❌ | 🟡 Continue row only | ✅ |
+| Home hero choice (last hub launch vs. first Roblox Continue game) | ❌ | ❌ | ✅ |
+| Launch command editor (presets: Default, GameMode, Dedicated GPU) | n/a | 🟡 type it in a terminal | ✅ |
+
+---
+
+## Library & Organization
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Favorites | ✅ | ✅ | ✅ |
+| Reorder favorites (move to front) | ❌ | ❌ | ✅ |
+| 🕒 Play later list (leaves the list when you play it) | ❌ | ❌ | ✅ |
+| Custom collections / folders of games | ❌ | ❌ | ✅ |
+| Notes overview for all games | ❌ | ❌ | ✅ |
+| Launch history with filter, delete and clear | 🟡 recently played only | 🟡 recently played only | ✅ |
+| Hide games from recommendations (and unhide) | ❌ | ❌ | ✅ |
+| Hidden items manager | ❌ | ❌ | ✅ |
+
+---
+
+## Discover & Recommendations
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Roblox's own Discover sorts | ✅ | ✅ | ✅ |
+| "Better recommendations" (trending, hidden gems, matched to your history via Rolimons) | ❌ | ❌ | ✅ |
+| Custom recommendations API (GET/POST, headers, body, JSON path, placeholders) | ❌ | ❌ | ✅ |
+| Test button for your API | ❌ | ❌ | ✅ |
+| Automatic fallback if the recommendations API is down | ❌ | ❌ | ✅ |
+| Choose the recommendation source | ❌ | ❌ | ✅ |
+
+---
+
+## Friends & Social
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Friends list with online / in-game / Studio status | ✅ | ✅ | ✅ |
+| Filter friends by name or game, sort by status or name | 🟡 | 🟡 | ✅ |
+| Pin friends (⭐) | ❌ | ❌ | ✅ |
+| Last online time, remembered by the hub | ❌ | ❌ | ✅ |
+| "Was playing …" last game for offline friends | ❌ | ❌ | ✅ |
+| Offline friends sorted by most recently online | ❌ | ❌ | ✅ |
+| Recent activity feed (came online, started a game, went offline) | ❌ | ❌ | ✅ |
+| Friend nicknames (only shown in the hub) | ❌ | ❌ | ✅ |
+| Add friend by username | ✅ | ✅ | ✅ |
+| Add several people at once | ❌ | ❌ | ✅ |
+| Friend requests: accept / decline | ✅ | ✅ | ✅ |
+| Bulk accept / decline all requests | 🟡 | ❌ | ✅ |
+| Friend card (Join, View game, Profile) | ✅ | ✅ | ✅ |
+| Right-click friend menu | ❌ | ❌ | ✅ |
+| Friends CSV export (with last online and last game) | ❌ | ❌ | ✅ |
+| Window title shows how many friends are in a game | ❌ | ❌ | ✅ |
+
+---
+
+## Notifications & Wellbeing
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Animated friend pop-up cards with a Join button | ❌ | ❌ | ✅ |
+| Notify: Off / Pinned friends only / All friends | ❌ | ❌ | ✅ |
+| Also notify when friends come online | ❌ | ❌ | ✅ |
+| Chime sound | ❌ | ❌ | ✅ |
+| Desktop notification when the app is in the background | 🟡 browser notifications | ❌ no push notifications on Linux | ✅ |
+| Test notification button | ❌ | ❌ | ✅ |
+| Quiet hours | ❌ | ❌ | ✅ |
+| Protection against false "everyone went offline" floods | ❌ | ❌ | ✅ |
+| Break reminders (every 30 to 120 min) | ❌ | ❌ | ✅ |
+| Daily play limit | 🟡 Roblox Parental Controls | 🟡 Roblox Parental Controls | ✅ |
+| Welcome-back message when Sober closes | ❌ | ❌ | ✅ |
+
+---
+
+## Chats, Messages, Communities & Profiles
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Roblox chat (read and send) | ✅ | ✅ | ✅ |
+| Unread chat badge | ✅ | ✅ | ✅ |
+| Message a friend straight from the friends list | ✅ | ✅ | ✅ |
+| Hide chats from specific players (hub only) | ❌ | ❌ | ✅ |
+| Messages: Inbox, Sent, Archive | ✅ | ❌ | ✅ |
+| Communities (groups) list | ✅ | ✅ | ✅ |
+| Profile lookup for any username | ✅ | ✅ | ✅ |
+| Friend / follower / following counts | ✅ | ✅ | ✅ |
+| Mutual friends list with count | ❌ | 🟡 | ✅ |
+| Last location and last game seen on a profile | 🟡 | 🟡 | ✅ |
+| Add friend, accept request, follow, copy link from a profile | ✅ | ✅ | ✅ |
+| "Join in Sober" straight from a profile | ❌ | ✅ | ✅ |
+
+---
+
+## Avatar & Catalog
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Live avatar render (Full / Bust / Head) | ✅ | ✅ | ✅ |
+| Wear / remove items, wear bundles | ✅ | ✅ | ✅ |
+| Wardrobe by category with search | ✅ | ✅ | ✅ |
+| Switch avatar type (R6 / R15) | ✅ | ✅ | ✅ |
+| Body scales and skin tone | ✅ | ✅ | ✅ |
+| Outfits: view, wear, save, rename, delete | ✅ | ✅ | ✅ |
+| ↩ Undo avatar changes | ❌ | ❌ | ✅ |
+| Remove all accessories in one click | 🟡 | 🟡 | ✅ |
+| Catalog / Avatar Shop search and buy | ✅ | ✅ | 🟡 opens the roblox.com catalog |
+
+---
+
+## Private Servers
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Servers you own or rent, with Join | ✅ | ✅ | ✅ |
+| Manage: rename, members, invite link, friend access, new link, renewal on/off | ✅ | 🟡 limited | ✅ |
+| Create a private server from the game page | ✅ | ✅ | ✅ |
+| Local saved private-server links with labels, grouped by game | ❌ | ❌ | ✅ |
+| Add a saved link from any game page or right-click menu | ❌ | ❌ | ✅ |
+
+---
+
+## Playtime & Stats
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Time played: total, today, last 7 days | ❌ | ❌ | ✅ |
+| Play streak | ❌ | ❌ | ✅ |
+| Most-played game | ❌ | ❌ | ✅ |
+| 14-day bar chart | ❌ | ❌ | ✅ |
+| Per-game time, launches, longest session, last played | ❌ | ❌ | ✅ |
+| Live timer for the running game in the top bar | ❌ | ❌ | ✅ |
+| Playtime CSV export | ❌ | ❌ | ✅ |
+| Reset playtime | ❌ | ❌ | ✅ |
+
+---
+
+## Sober Settings & Tweaks
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Sober install status, version, running state | n/a | 🟡 terminal | ✅ |
+| Update Sober / stop Sober from the UI | n/a | 🟡 terminal (Flatpak) | ✅ |
+| Open Sober's config folder | n/a | 🟡 file manager | ✅ |
+| Discord Rich Presence toggle | n/a | 🟡 config file | ✅ |
+| OpenGL renderer, HiDPI, touch mode toggles | n/a | 🟡 config file | ✅ |
+| Gamepad access, close-on-leave toggles | n/a | 🟡 config file | ✅ |
+| Server location indicator toggle | n/a | 🟡 config file | ✅ |
+| Old "oof" death sound toggle | n/a | 🟡 config file | ✅ |
+| FPS cap and frame rate cap presets | n/a | 🟡 manual flag | ✅ |
+| Fast Flag presets: MSAA, texture quality, lighting, graphics level, DPI fix, Alt+Enter fix | n/a | 🟡 manual flag | ✅ |
+| Fast Flag editor: add, change, remove single flags | n/a | 🟡 manual file edit | ✅ |
+| Import / download / copy flag JSON | n/a | ❌ | ✅ |
+| Reset all flags in one click | n/a | ❌ | ✅ |
+| Warns you when Sober is running, so it can't overwrite your changes | n/a | ❌ | ✅ |
+
+---
+
+## Mods
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Old avatar background mod (one click, downloaded from GitHub) | n/a | 🟡 manual files in the asset overlay | ✅ |
+| Old character sounds mod | n/a | 🟡 manual files | ✅ |
+| Cursor styles (2013, 2006) | n/a | 🟡 manual files | ✅ |
+| Emoji fonts (Catmoji, Windows 11, 10, 8.1) | n/a | 🟡 manual files | ✅ |
+| Custom font (.ttf, .otf, .ttc) | n/a | 🟡 manual files | ✅ |
+| Custom death sound (.ogg) with audio format check | n/a | 🟡 manual files | ✅ |
+| Custom arrow / far cursor images | n/a | 🟡 manual files | ✅ |
+| Custom file paths in the asset overlay | n/a | 🟡 manual files | ✅ |
+| List, remove, remove-all mods; open overlay folder | n/a | ❌ | ✅ |
+| Safe apply (conflict warnings, format checks, nothing installed under the wrong format) | n/a | ❌ | ✅ |
+
+---
+
+## Roblox Account Settings
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Account Info, Security, Privacy, Parental Controls, Notifications, Billing | ✅ | ✅ | 🟡 shortcuts that open roblox.com |
+| Edit About me and display name | ✅ | ✅ | ✅ |
+| Chat and inventory privacy settings | ✅ | ✅ | ✅ |
+| Robux balance shown | ✅ | ✅ | ✅ |
+
+---
+
+## Customization
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Theme presets (Roblox Dark, Roblox Light, Amoled, Rose, Sunset, Ocean, Forest, Purple, Mono) | 🟡 light / dark | 🟡 light / dark | ✅ |
+| Color pickers (background, panel, accent, green, text) | ❌ | ❌ | ✅ |
+| Corner radius, font and tile size | ❌ | ❌ | ✅ |
+| Compact layout | ❌ | ❌ | ✅ |
+| Custom CSS editor with live preview and template | ❌ | ❌ | ✅ |
+| Local `file://` background images in custom CSS | ❌ | ❌ | ✅ |
+
+---
+
+## Quality of Life
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Ctrl+K quick jump (tabs, games, pasted links, search) | ❌ | ❌ | ✅ |
+| `/` focuses the search bar | ❌ | ❌ | ✅ |
+| Right-click game menu | ❌ | ❌ | ✅ |
+| Right-click empty-space menu | ❌ | ❌ | ✅ |
+| 🩺 Health check (Sober, Roblox session, connection, optional tools) | ❌ | ❌ | ✅ |
+
+---
+
+## Login, Data & Updates
+
+| | Roblox in a browser | Sober on its own | **Sober Hub** |
+|---|:-:|:-:|:-:|
+| Quick Login with a code (no password typed in the app) | ✅ | ✅ | ✅ |
+| Cookie login | ❌ | ❌ | ✅ |
+| Public-profile-only mode | ✅ | ❌ | ✅ |
+| Cookie stored locally and only sent to `*.roblox.com` | n/a | n/a | ✅ |
+| Local-only server (127.0.0.1) with Host/Origin checks | n/a | n/a | ✅ |
+| Backup export / import (never includes your cookie) | ❌ | ❌ | ✅ |
+| Auto-update from GitHub (syntax-checked, old file kept as `.bak`) | n/a | 🟡 Flatpak updates only | ✅ |
+| "What's new" pop-up and update log | ❌ | ❌ | ✅ |
+| Native window or browser app window, desktop shortcut install | n/a | n/a | ✅ |
+
+---
+
+*Notes: "Roblox in a browser" means roblox.com. "Sober on its own" means the Roblox Android app running through Sober without Sober Hub; 🟡 entries there can be done only by editing config files or flags by hand, typing terminal commands, or in a limited way. Block / Unblock is intentionally not in Sober Hub, because Roblox rejects it from outside the official app.*
 ## ✨ Features
 
 * 🎮 **Launcher & Quick Join:** Launch by place ID, `roblox.com/games` link, `roblox://` link or private-server link. Browse public servers (emptiest, fullest, best ping, random) and join a friend's server directly.
