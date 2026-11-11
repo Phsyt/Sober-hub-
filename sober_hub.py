@@ -32,8 +32,17 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone
 
-VERSION = "5.5.0"   # bump this and push the file to GitHub to roll out an update
+VERSION = "5.6.0"   # bump this and push the file to GitHub to roll out an update
 WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release (keep each line under 200 characters)
+    "New Server hop: jump to a different public server (skips your recent ones and full or empty ones, prefers low ping) from the game page, the game right-click menu and Home",
+    "New Play later list: add games from the right-click menu or the game page. They show on Home and in Library and leave the list when you play them",
+    "New Healthy play settings: break reminders every 30 to 120 minutes and an optional daily play limit, with a pop-up and a desktop alert",
+    "New Mutual friends on every profile you look up, with a count in the profile header",
+    "New friend nicknames: right-click a friend > Set nickname. Shown in Friends, Home and notifications; the real name stays on their card",
+    "New Health check in Hub Settings: tests Sober, your Roblox session, the connection and the optional tools (ffmpeg, desktop alerts) and tells you what to fix",
+    "Block / Unblock removed: Roblox rejects it when it comes from outside the app. Blocked users can still be managed on roblox.com (Roblox Settings > Privacy)",
+]
+CHANGELOG_OLD = [   # the previous version's notes, shown under Settings > Updates
     "Friends now show when they were last online: Sober Hub remembers the last time it saw each friend online (tracked while the hub is open). Shown on Friends, the friend card and Profile",
     "If a friend went offline while playing, you also see which game they were in (\"was playing Adopt Me!\"). Profile also shows the last game seen",
     "Offline friends are sorted by who was online most recently",
@@ -45,22 +54,13 @@ WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an
     "Installing a custom death sound warns you if the built-in old-oof switch is on, because the two can conflict",
     "New update log: Settings > Updates lists what is new in this version and the previous one",
 ]
-CHANGELOG_OLD = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release
-    "Block / Unblock rebuilt: the hub now talks to Roblox with browser-like headers and tries every known endpoint, so the 403 error is fixed for most accounts. If Roblox still refuses (for example it asks for a verification check) you are sent straight to roblox.com to finish it",
-    "Blocked users list loads reliably again (no more 403 on the Profile and Roblox Settings tabs)",
-    "Death sound fixed: new 'Old oof death sound' switch under Tweaks & Mods uses Sober's own setting, and a custom death sound file is now installed under every file name Roblox uses for it",
-    "Tweaks & Mods: MSAA, texture quality, display scaling, old avatar background, old character sounds, 2006/2013 cursors, emoji fonts, custom font and a Fast Flag editor (Sober is closed first so your changes are not overwritten)",
-    "Friend notifications: animated pop-up cards with avatar, game icon, sound and a Join button, plus desktop alerts through your system",
-    "Avatar editor with live render, outfits and bundles; Profile lookup shows the whole profile",
-    "Games started from the hub close back to Sober Hub, and Rejoin last server works even after a plain Play",
-]
 REPO_RAW = "https://raw.githubusercontent.com/Phsyt/Sober-hub-/main/sober_hub.py"
 ARGV = list(sys.argv)   # sys.argv[0] is overwritten later for the window class, so keep the real command line for restarts
 D = os.path.expanduser("~/.config/sober-hub"); F = D + "/data.json"
 SC = os.path.expanduser("~/.var/app/org.vinegarhq.Sober/config/sober/config.json")
 APP = "org.vinegarhq.Sober"
-DEF = {"user": None, "favs": [], "history": [], "play": {}, "notes": {}, "css": "", "daily": {}, "pinned": [], "collections": {}, "hidden_games": [], "hidden_chat": {}, "privs": [], "upd_notice": None, "capi": {"url": "", "method": "GET", "headers": "", "body": "", "path": ""},
-       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "autoupd": "1", "nsound": "1", "nonline": "1", "ndesk": "1", "backhub": "1", "qon": "0", "qs": "23:00", "qe": "07:00"},
+DEF = {"user": None, "favs": [], "history": [], "play": {}, "notes": {}, "css": "", "daily": {}, "pinned": [], "collections": {}, "hidden_games": [], "hidden_chat": {}, "privs": [], "upd_notice": None, "nicks": {}, "later": [], "capi": {"url": "", "method": "GET", "headers": "", "body": "", "path": ""},
+       "opts": {"cmd": "flatpak run " + APP, "recs": "better", "hero": "hub", "notify": "pinned", "autoupd": "1", "nsound": "1", "nonline": "1", "ndesk": "1", "backhub": "1", "qon": "0", "qs": "23:00", "qe": "07:00", "brk": "0", "brkmin": "60", "lim": "0"},
        "theme": {"bg": "#1a1210", "panel": "#271a16", "accent": "#ff8a3d", "green": "#ff8a3d", "text": "#fff0e6", "radius": "8", "font": "system-ui", "tile": "150", "compact": "0"}}
 OLD_THEME = {"bg": "#18191d", "panel": "#232527", "accent": "#335fff", "green": "#00b06f", "text": "#f7f7f8"}   # the previous default (the "Roblox Dark" preset)
 lock = threading.Lock()
@@ -153,36 +153,6 @@ def req(url, body=None, method=None, timeout=12, ref=None):
         if e.code == 403 and e.headers.get("rblx-challenge-id"): m = "Roblox wants a verification challenge for this action (HTTP 403)"
         m = m or f"Roblox returned HTTP {e.code}"
         raise Exception(m)
-
-def block(a):
-    """Block or unblock a user on the real Roblox account. Tries each known endpoint with browser-like headers (Origin + the person's profile as Referer)
-    and a fresh CSRF token; the UI sends the person to roblox.com if Roblox still refuses (for example when it asks for a verification challenge)."""
-    i, on = int(a["id"]), bool(a.get("on", True)); ref = f"https://www.roblox.com/users/{i}/profile"; errs = []
-    for url in (f"https://apis.roblox.com/user-blocking-api/v1/users/{i}/" + ("block-user" if on else "unblock-user"),
-                f"https://accountsettings.roblox.com/v1/users/{i}/" + ("block" if on else "unblock")):
-        try: req(url, {}, "POST", ref=ref); return {"ok": True}
-        except Exception as e:
-            if str(e) not in errs: errs.append(str(e))
-    raise Exception(errs[0] if len(errs) == 1 else " / ".join(errs))
-
-def blocked(a):
-    """The accounts you have blocked, as [{id, name, display}]. Tries the newer endpoint and the older detailed one, both with browser-like headers."""
-    ref = "https://www.roblox.com/my/account"; errs = []
-    try:
-        r = req("https://accountsettings.roblox.com/v1/users/get-detailed-blocked-users", ref=ref)
-        l = r.get("blockedUsers")
-        if isinstance(l, list): return [{"id": x["userId"], "name": x.get("name") or "", "display": x.get("displayName") or x.get("name") or ""} for x in l if x.get("userId")]
-    except Exception as e: errs.append(str(e))
-    ids, cur = [], ""
-    try:
-        for _ in range(40):
-            r = req("https://apis.roblox.com/user-blocking-api/v1/users/get-blocked-users?count=50" + (f"&cursor={urllib.parse.quote(cur)}" if cur else ""), ref=ref)
-            d = r.get("data") or r; l = d.get("blockedUserIds") or []; ids += l; cur = d.get("cursor") or d.get("nextPageCursor")
-            if not cur or not l: break
-    except Exception as e:
-        if not ids: raise Exception(errs[0] if errs and errs[0] != str(e) else str(e))
-    res = resolve(ids)
-    return [{"id": i, "name": (res.get(i) or ("", ""))[0], "display": (res.get(i) or ("", ""))[1] or "User " + str(i)} for i in ids]
 
 def thumbs(kind, ids, size="150x150"):
     """Batch thumbnail lookup (100 ids per request) -> {targetId: imageUrl}. kind is e.g. 'users/avatar-headshot' or 'games/icons'."""
@@ -746,6 +716,10 @@ def friends(a):
         out.append({"id": f["id"], "name": nm[f["id"]][0], "display": nm[f["id"]][1], "avatar": av.get(f["id"]),
                     "status": p.get("userPresenceType", 0), "place": p.get("rootPlaceId"), "job": p.get("gameId"), "where": p.get("lastLocation"),
                     "seen": r.get("t") or 0, "sing": bool(r.get("ing")), "sgame": r.get("g") or "", "splace": r.get("p"), "gt": r.get("gt") or 0})
+    nk = load().get("nicks") or {}
+    for o in out:   # a nickname replaces the display name everywhere in the hub; the real one is kept as "real"
+        n = nk.get(str(o["id"]))
+        if n: o["real"], o["display"], o["nick"] = o["display"], n, True
     out.sort(key=lambda x: {2: 0, 1: 1, 3: 2, 0: 3}.get(x["status"], 3))
     return out
 
@@ -987,6 +961,50 @@ def sober(_):
         except Exception: pass
     return {"installed": inst, "version": ver, "running": running, "cfg": cfg_read()[0], "path": SC}
 
+def doctor(_a):
+    """Hub health check -> [{name, state: ok|warn|bad, detail}]. Network checks run in parallel; the cookie only ever goes to roblox.com."""
+    def row(name, state, detail): return {"name": name, "state": state, "detail": detail}
+    def hub():
+        try: import webview; win = "native window (pywebview)"
+        except Exception: win = "browser app window (pywebview is optional)"
+        st = "ok" if sys.version_info >= (3, 8) else "warn"
+        return row("Sober Hub", st, f"v{VERSION} · Python {sys.version.split()[0]} · {win}")
+    def data():
+        try:
+            base = D if os.path.isdir(D) else os.path.dirname(D)
+            if not os.access(base, os.W_OK): return row("Hub data", "bad", f"{D} is not writable, so nothing can be saved")
+            if os.path.exists(F) and os.stat(F).st_mode & 0o077: return row("Hub data", "warn", f"{F} is readable by other users. Fix: chmod 600 {F}")
+            return row("Hub data", "ok", F)
+        except Exception as e: return row("Hub data", "bad", str(e))
+    def sob():
+        if not shutil.which("flatpak"): return [row("Sober", "bad", "flatpak was not found. Install flatpak, then: flatpak install flathub " + APP)]
+        if _run(["flatpak", "info", APP]).returncode != 0: return [row("Sober", "bad", "Sober is not installed. Run: flatpak install flathub " + APP)]
+        try: running = APP in _run(["flatpak", "ps", "--columns=application"]).stdout
+        except Exception: running = False
+        out = [row("Sober", "ok", "installed" + (" and running" if running else ""))]
+        try:
+            n = len((cfg_read()[0] or {}).get("fflags") or {})
+            out.append(row("Sober config", "ok" if os.path.exists(SC) else "warn", f"{SC} ({n} Fast Flags)" if os.path.exists(SC) else "Not created yet. Start Sober once"))
+        except Exception as e: out.append(row("Sober config", "bad", str(e)))
+        return out
+    def tools():
+        return [row("ffmpeg", "ok" if shutil.which("ffmpeg") else "warn", "found" if shutil.which("ffmpeg") else "Optional: needed to convert MP3 files for the custom death sound"),
+                row("Desktop alerts", "ok" if shutil.which("notify-send") else "warn", "notify-send found" if shutil.which("notify-send") else "Optional: install libnotify-bin for desktop alerts (break reminders, friend pop-ups)")]
+    def net(name, url):
+        try:
+            t0 = time.time(); urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "SoberHub"}), timeout=8).read(512)
+            return row(name, "ok", f"reachable ({round((time.time() - t0) * 1000)} ms)")
+        except Exception as e: return row(name, "bad", f"cannot reach it: {e}")
+    def acct():
+        if not load().get("cookie"): return row("Roblox account", "warn", "Not connected. Friends, Chats and Avatar need Hub Login")
+        try: return row("Roblox account", "ok", "Session is valid, logged in as " + str(req("https://users.roblox.com/v1/users/authenticated").get("name", "?")))
+        except Exception as e: return row("Roblox account", "bad", f"{e}. Reconnect in Hub Login")
+    with ThreadPoolExecutor(4) as ex:
+        fr, fs = ex.submit(net, "Roblox connection", "https://users.roblox.com/v1/users/1"), ex.submit(net, "GitHub (updates)", REPO_RAW)
+        fa = ex.submit(acct)
+        rows = [hub(), data(), *sob(), *tools(), fr.result(), fa.result(), fs.result()]
+    return rows
+
 def sober_set(a):
     """Merge settings into Sober's config.json: `fflags` is merged, `fflag_del` removes flags, any other key is set directly. Sober reads the file at startup, so it must be restarted."""
     cfg, head = cfg_read()
@@ -1044,7 +1062,7 @@ def imp(a):
 def state(_):
     """Everything the UI needs, minus the cookie itself (only a `connected` flag is exposed)."""
     d = load(); c = bool(d.pop("cookie", None)); d["connected"] = c; d["version"] = VERSION
-    d["changelog"] = [{"v": VERSION, "notes": WHATS_NEW}, {"v": "5.4.0", "notes": CHANGELOG_OLD}]; return d
+    d["changelog"] = [{"v": VERSION, "notes": WHATS_NEW}, {"v": "5.5.0", "notes": CHANGELOG_OLD}]; return d
 
 def rbx(a):
     """Generic proxy to Roblox APIs for the UI. Only https://*.roblox.com is allowed."""
@@ -1281,11 +1299,11 @@ def mods_dir(_a):
     os.makedirs(OVL, exist_ok=True)
     subprocess.Popen(["xdg-open", OVL], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); return {"ok": True}
 
-R = {"block": block, "blocked": blocked, "state": state, "lastplayed": lastplayed, "open": open_url, "rbx": rbx, "me": me, "game": lambda a: ginfo(a["place"]), "search": search, "servers": servers,
+R = {"state": state, "lastplayed": lastplayed, "open": open_url, "rbx": rbx, "me": me, "game": lambda a: ginfo(a["place"]), "search": search, "servers": servers,
      "user": user, "connect": connect, "ql_start": ql_start, "ql_poll": ql_poll, "ql_cancel": ql_cancel,
      "upd_status": upd_status, "upd_check": upd_check, "upd_ack": upd_ack, "upd_restart": upd_restart, "disconnect": disconnect, "friends": friends, "frequests": frequests, "discover": discover, "capi_test": capi_test, "launch": launch,
      "active": active, "dnotify": dnotify, "focus": lambda a: {"ok": focus_hub()}, "heal": lambda a: heal(a["places"]), "hist_del": hist_del, "sober": sober, "sober_set": sober_set, "sober_update": sober_update,
-     "sober_kill": sober_kill, "sober_dir": sober_dir, "save": save, "clear": clear, "import": imp,
+     "sober_kill": sober_kill, "doctor": doctor, "sober_dir": sober_dir, "save": save, "clear": clear, "import": imp,
      "mods_list": mods_list, "mods_preset": mods_preset, "mods_font": mods_font, "mods_put": mods_put, "mods_del": mods_del, "mods_dir": mods_dir,
      "lastseen": lastseen, "lsevents": lsevents, "ls_clear": ls_clear}
 
@@ -1479,7 +1497,7 @@ async function fnote(f,kind){
 const ntest=()=>{const u=S.user||{};fnote({id:u.id||0,display:'Test Friend',avatar:u.avatar||'',status:2,place:null,where:'Notifications work!'},'play')};
 const setOpt=(k,v)=>save({opts:{[k]:v}},1);
 let HADACT=false;
-async function pollActive(){const r=await api('active');ACT=Array.isArray(r)?r:[];const e=$('#act');if(e)e.outerHTML=actHTML();
+async function pollActive(){const r=await api('active');ACT=Array.isArray(r)?r:[];breakCheck();const e=$('#act');if(e)e.outerHTML=actHTML();
  if(HADACT&&!ACT.length){try{window.focus()}catch(x){}api('focus',{});toast('Welcome back to Sober Hub',4000);load()}HADACT=ACT.length>0}
 function setTitle(l){const n=l.filter(f=>f.status==2).length;document.title=(n?`(${n}) `:'')+'Sober Hub'}
 async function watch(){if(!S.connected||!S.opts)return;const l=await api('friends');if(!Array.isArray(l)||!l.length)return;setTitle(l);if(S.opts.notify=='off'){PREV=null;return}
@@ -1494,7 +1512,7 @@ const tile=(g,sub)=>(GM[g.place]=g,`<div class=tile onclick="openGame(${g.place}
 const dtile=g=>tile(g,`${g.like!=null?'👍 '+g.like+'% · ':''}👤 ${(g.playing||0).toLocaleString()}`);
 function setFriends(l){const pn=new Set(S.pinned||[]);l.sort((a,b)=>(pn.has(b.id)-pn.has(a.id))||((ORD[a.status]??3)-(ORD[b.status]??3)));FR=l;setTitle(l);return l}
 const frs=l=>l.map(f=>`<div class=fr onclick="showFriend(${f.id})" oncontextmenu="friendMenu(event,${f.id})"><div class=ava><img src="${esc(f.avatar||'')}"><span class="dot s${f.status}"></span></div><b>${(S.pinned||[]).includes(f.id)?'⭐ ':''}${esc(f.display)}</b><small>${f.status==2?esc(f.where||'In game'):f.status==1?'Online':f.status==0&&f.seen?esc(agoS(f.seen)):''}</small></div>`).join('')||'<small>No friends found</small>';
-async function play(place,name,icon,job,code){const r=await api('launch',{place,name,icon,job,code});toast(r.error?r.error:'Launching in Sober…');setTimeout(load,900);setTimeout(pollActive,2500)}
+async function play(place,name,icon,job,code){const r=await api('launch',{place,name,icon,job,code});if(!r.error&&(S.later||[]).some(x=>x.place==place))save({later:S.later.filter(x=>x.place!=place)},1);toast(r.error?r.error:'Launching in Sober…');setTimeout(load,900);setTimeout(pollActive,2500)}
 function pl(place,job,code){const g=cur&&cur.place==place?cur:(S.favs.find(f=>f.place==place)||S.history.find(f=>f.place==place)||{});play(place,g.name||'',g.icon||'',job||null,code||null)}
 function joinFriend(id){const f=FR.find(x=>x.id==id);if(!f)return;if(f.status==2&&f.place){play(f.place,f.where||'',null,f.job)}else toast(f.status==2?'Game not joinable':'Friend is not in a game')}
 function heroHTML(g,label){LP=g;const l=lastSrv(g.place),p2=S.play[g.place];
@@ -1511,8 +1529,8 @@ home(){const h=hist(),lj=h[0]&&lastSrv(h[0].place),pl0=Object.values(S.play),tot
  return `<h2>${greet()}${S.user?', '+esc(S.user.display):''}</h2><div id=hero></div>
  <div class=card><span class=stat><b>${fmt(todaySecs())}</b>today</span><span class=stat><b>${fmt(tot)}</b>total</span><span class=stat><b>${pl0.reduce((a,b)=>a+b.launches,0)}</b>launches</span><span class=stat><b>${S.favs.length}</b>favorites</span><span class=stat><b id=fo>${S.connected?'…':'—'}</b>friends in game</span></div>
  ${S.connected?'<h3 style="margin-top:0">Friends</h3><div id=fr class=rs>Loading…</div>':`<div class=card>🔗 <b>Connect your Roblox account</b> to see friends, who's in-game, join them, and your Robux. <button class=btn onclick="go('home');go('account')">Connect</button></div>`}
- <div class=row>${lj?`<button class="btn alt" onclick="pl(${lj.place},'${esc(lj.job||'')}','${esc(lj.code||'')}')">↩ Rejoin last server</button>`:''}${S.favs.length?`<button class="btn alt" onclick="rnd()">🎲 Random favorite</button>`:''}<button class="btn alt" onclick="cmdk()">⌨ Quick jump (Ctrl+K)</button></div>
- <div id=cont></div>${S.favs.length?`<h3>Favorites</h3><div id=fav class=rs>${S.favs.map(g=>tile(g)).join('')}</div>`:''}<div id=disc><small>Loading recommendations…</small></div>`},
+  <div class=row>${lj?`<button class="btn alt" onclick="pl(${lj.place},'${esc(lj.job||'')}','${esc(lj.code||'')}')">↩ Rejoin last server</button><button class="btn alt" onclick="hop(${lj.place})">🔀 Hop to a new server</button>`:''}${S.favs.length?`<button class="btn alt" onclick="rnd()">🎲 Random favorite</button>`:''}<button class="btn alt" onclick="cmdk()">⌨ Quick jump (Ctrl+K)</button></div>
+ <div id=cont></div>${(S.later||[]).length?`<h3>🕒 Play later</h3><div class=rs>${S.later.map(g=>tile(g)).join('')}</div>`:''}${S.favs.length?`<h3>Favorites</h3><div id=fav class=rs>${S.favs.map(g=>tile(g)).join('')}</div>`:''}<div id=disc><small>Loading recommendations…</small></div>`},
 friends(){return S.connected?`<h2>Friends <small id=fsum style="display:inline"></small></h2>
  <small style="margin:0 0 10px">You can only add trusted friends from <a style="cursor:pointer;color:var(--accent)" onclick="open_('https://www.roblox.com/users/friends#!/friend-requests')">https://www.roblox.com/users/friends#!/friend-requests</a></small>
  <div class=row><input id=fq value="${esc(FQ)}" placeholder="Filter friends or games…" style="flex:1;min-width:200px" oninput="FQ=this.value;renderFriends()"><select onchange="FSORT=this.value;renderFriends()"><option value=status ${FSORT=='status'?'selected':''}>Sort: status</option><option value=name ${FSORT=='name'?'selected':''}>Sort: name</option></select><button class="btn alt" onclick="go('friends')">↻ Refresh</button></div>
@@ -1524,6 +1542,7 @@ games(){return `<h2>Discover</h2><div class=card><b>Quick launch</b><small>Paste
 library(){const C=S.collections||{},CK=Object.keys(C),nt=Object.entries(S.notes||{}).filter(([,v])=>v&&v.trim());
  const lt=(g,b)=>(GM[g.place]=g,`<div class=tile oncontextmenu="gameMenu(event,${g.place})"><img loading=lazy src="${esc(g.icon||'')}" onclick="openGame(${g.place})" onerror="this.style.opacity=.2"><b>${esc(g.name||g.place)}</b><div>${b}</div></div>`);
  return `<h2>Library</h2><h3 style="margin-top:0">⭐ Favorites (${S.favs.length})</h3><div class=grid>${S.favs.map((g,i)=>lt(g,`<button class="btn sm" onclick="pl(${g.place})">Play</button><button class="btn alt sm" title="Move to front" onclick="favFirst(${i})">↑</button><button class="btn alt sm" onclick="favDel(${g.place})">✕</button>`)).join('')||'<small>Open a game and press ☆ Favorite to add it here.</small>'}</div>
+ ${(S.later||[]).length?`<h3>🕒 Play later (${S.later.length})</h3><div class=grid>${S.later.map(g=>lt(g,`<button class="btn sm" onclick="pl(${g.place})">Play</button><button class="btn alt sm" onclick="laterDel(${g.place})">✕</button>`)).join('')}</div>`:''}
  ${CK.map((n,ci)=>`<h3>📁 ${esc(n)} (${C[n].length}) <button class="btn alt sm" onclick="delColl(${ci})">Delete collection</button></h3><div class=grid>${C[n].map((g,gi)=>lt(g,`<button class="btn sm" onclick="pl(${g.place})">Play</button><button class="btn alt sm" onclick="rmColl(${ci},${gi})">✕</button>`)).join('')||'<small>Empty</small>'}</div>`).join('')}
  <div class=row style="margin-top:16px"><button class="btn alt" onclick="newColl()">＋ New collection</button></div>
  ${nt.length?`<h3>📝 Notes</h3><div class=card>${nt.map(([p,v])=>`<details><summary onclick="openGame(${p})" style="cursor:pointer"><b>${esc(nameOf(p))}</b></summary><small>${esc(v)}</small></details>`).join('')}</div>`:''}`},
@@ -1562,6 +1581,9 @@ hub(){const o=S.opts;return `<h2>Hub settings</h2>
  <div class=card><b>Quiet hours</b><small>No friend pop-ups, chimes or desktop alerts during these hours. Last-online tracking keeps running.</small><label style="display:block;margin:8px 0"><input type=checkbox ${o.qon=='1'?'checked':''} onchange="setOpt('qon',this.checked?'1':'0')"> Enable quiet hours</label><div class=row><input type=time value="${esc(o.qs||'23:00')}" onchange="setOpt('qs',this.value)"><span>to</span><input type=time value="${esc(o.qe||'07:00')}" onchange="setOpt('qe',this.value)"></div></div>
  <div class=card><b>Games</b><label style="display:block;margin:6px 0"><input type=checkbox ${o.backhub!='0'?'checked':''} onchange="setOpt('backhub',this.checked?'1':'0')"> Return to Sober Hub when I leave a game <small style="display:inline">- Sober closes instead of showing its own home screen (only for games started from the hub; your own Sober setting is restored afterwards)</small></label></div>
  <div class=card><b>Updates</b><small>Sober Hub v${esc(S.version||'')} · checks GitHub on start and every 6 hours. A newer sober_hub.py in the repo is installed automatically (the old file is kept as sober_hub.py.bak).</small><label class=row style="margin:8px 0"><input type=checkbox ${o.autoupd!='0'?'checked':''} onchange="save({opts:{autoupd:this.checked?'1':'0'}})"> Update automatically</label><button class=btn onclick="updNow(this)">Check for updates now</button><details open style="margin-top:12px"><summary><b>Update log</b></summary>${(S.changelog||[]).map(c=>`<b style="display:block;margin-top:8px">v${esc(c.v)}</b><ul style="margin:4px 0 0 18px">${c.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>`).join('')}</details></div>
+ <div class=card><b>Healthy play</b><small>Gentle reminders while a game launched from the hub is running. They show in the hub and as a desktop alert.</small><label style="display:block;margin:8px 0"><input type=checkbox ${o.brk=='1'?'checked':''} onchange="setOpt('brk',this.checked?'1':'0')"> Remind me to take a break</label>
+  <div class=row>Every <select onchange="setOpt('brkmin',this.value)">${[30,45,60,90,120].map(m=>`<option value=${m} ${(+o.brkmin||60)==m?'selected':''}>${m} min</option>`).join('')}</select> of playing · Daily limit <select onchange="setOpt('lim',this.value)">${[[0,'Off'],[60,'1 hour'],[120,'2 hours'],[180,'3 hours'],[240,'4 hours']].map(([m,l])=>`<option value=${m} ${(+o.lim||0)==m?'selected':''}>${l}</option>`).join('')}</select><button class="btn alt sm" onclick="remind('Time for a break','This is what a reminder looks like.')">Test</button></div></div>
+ <div class=card><b>🩺 Health check</b><small>Tests Sober, your Roblox session, the connection and the optional tools some features rely on.</small><button class=btn onclick="doctor(this)">Run health check</button><div id=docr style="margin-top:10px"></div></div>
  ${hiddenCard()}<div class=card><b>Keyboard shortcuts</b><small><code>Ctrl+K</code> quick jump to tabs/games/links · <code>/</code> focus search · <code>Esc</code> close pop-ups</small></div>`},
 style(){return `<h2>Style & CSS</h2><div class=card><b>Presets</b><div class=row>${Object.keys(PRESETS).map(k=>`<button class="btn alt" onclick="preset('${k}')">${k}</button>`).join('')}</div>
  <div class=row style="margin-top:10px">${['bg','panel','accent','green','text'].map(k=>`${k} <input type=color value="${S.theme[k]}" onchange="save({theme:{${k}:this.value}},1)">`).join(' ')} radius <input type=range min=0 max=30 value=${S.theme.radius} oninput="save({theme:{radius:this.value}},1)"> font <select onchange="save({theme:{font:this.value}},1)">${['system-ui','monospace','Georgia','Verdana'].map(f=>`<option ${S.theme.font==f?'selected':''}>${f}</option>`).join('')}</select></div>
@@ -1665,11 +1687,11 @@ async function openGame(p,focus){if(tab!='game')PT=tab;tab='game';document.query
  const pl2=S.play[p]||{},h=lastSrv(p),isF=S.favs.some(f=>f.place==p),C=S.collections||{},fp=FR.filter(f=>f.status==2&&String(f.place)==String(p));
  $('#main').innerHTML=`<a class="btn alt" onclick="go(PT||'games')">← Back</a><div class=card><div class=row style="align-items:flex-start;gap:20px"><img src="${esc(g.icon)}" style="width:200px;border-radius:var(--radius)"><div style="flex:1;min-width:260px"><h2 style="margin:0">${esc(g.name)}</h2><small>By ${esc(g.creator)} · updated ${g.updated} · max ${g.maxp} players</small>
  <p><span class=stat><b>${g.like!=null?'👍 '+g.like+'%':'—'}</b>rating</span><span class=stat><b>${g.playing.toLocaleString()}</b>playing</span><span class=stat><b>${g.visits.toLocaleString()}</b>visits</span><span class=stat><b>${g.favs.toLocaleString()}</b>favorites</span></p>
- <button class="btn play" onclick="pl(${p})">▶ Play</button>${h?`<button class=btn onclick="pl(${p},'${esc(h.job||'')}','${esc(h.code||'')}')">↩ Last server</button>`:''}<button class="btn alt" onclick="fav(cur,${!isF}).then(()=>openGame(${p}))">${isF?'★ Favorited':'☆ Favorite'}</button>${S.connected?'<button class="btn alt" onclick="vote(true)">👍</button><button class="btn alt" onclick="vote(false)">👎</button><button class="btn alt" onclick="rfav()">❤ Favorite on Roblox</button>':''}
+ <button class="btn play" onclick="pl(${p})">▶ Play</button>${h?`<button class=btn onclick="pl(${p},'${esc(h.job||'')}','${esc(h.code||'')}')">↩ Last server</button>`:''}<button class="btn alt" onclick="fav(cur,${!isF}).then(()=>openGame(${p}))">${isF?'★ Favorited':'☆ Favorite'}</button><button class="btn alt" onclick="laterToggle(cur).then(()=>openGame(${p}))">${(S.later||[]).some(x=>x.place==p)?'🕒 In Play later':'🕒 Play later'}</button>${S.connected?'<button class="btn alt" onclick="vote(true)">👍</button><button class="btn alt" onclick="vote(false)">👎</button><button class="btn alt" onclick="rfav()">❤ Favorite on Roblox</button>':''}
  <div class=row style="margin-top:6px"><select onchange="addToColl(this.value)"><option value="">＋ Add to collection…</option>${Object.keys(C).map((n,i)=>`<option value=${i}>${esc(n)}</option>`).join('')}<option value=new>New collection…</option></select><button class="btn alt sm" onclick="copy('https://www.roblox.com/games/${p}')">Copy link</button><button class="btn alt sm" onclick="copy('roblox://experiences/start?placeId=${p}')">Copy launch link</button><button class="btn alt sm" onclick="open_('https://www.roblox.com/games/${p}')">Open on roblox.com</button></div></div></div>
  <p>${esc(g.desc)}</p><span class=stat><b>${fmt(pl2.secs||0)}</b>your time</span><span class=stat><b>${pl2.launches||0}</b>launches</span><span class=stat><b>${ago(pl2.last)}</b>last played</span></div>
  ${fp.length?`<div class=card><b>Friends playing this (${fp.length})</b><div class=rs style="margin-top:8px">${fp.map(f=>`<div class=fr onclick="joinFriend(${f.id})"><div class=ava><img src="${esc(f.avatar||'')}"><span class="dot s2"></span></div><b>${esc(f.display)}</b><small>Click to join</small></div>`).join('')}</div></div>`:''}
- <div class=card><b>Notes</b><textarea rows=3 onchange="save({notes:{${p}:this.value}})">${esc(S.notes[p]||'')}</textarea></div>${privCard(p)}<div class=card><b>Public servers</b><div class=row><button class="btn alt" onclick="srv(${p},'Asc')">Emptiest</button><button class="btn alt" onclick="srv(${p},'Desc')">Fullest</button><button class="btn alt" onclick="renderSV(${p},'ping')">Best ping (loaded)</button><button class="btn alt" onclick="randSrv(${p})">🎲 Random server</button></div><div id=sv></div></div>`;srv(p,'Asc');pvSaved(p);if(focus=='priv')setTimeout(()=>{const e=$('#privcard');e&&e.scrollIntoView({behavior:'smooth'})},400)}
+ <div class=card><b>Notes</b><textarea rows=3 onchange="save({notes:{${p}:this.value}})">${esc(S.notes[p]||'')}</textarea></div>${privCard(p)}<div class=card><b>Public servers</b><div class=row><button class="btn alt" onclick="srv(${p},'Asc')">Emptiest</button><button class="btn alt" onclick="srv(${p},'Desc')">Fullest</button><button class="btn alt" onclick="renderSV(${p},'ping')">Best ping (loaded)</button><button class="btn alt" onclick="randSrv(${p})">🎲 Random server</button><button class="btn alt" onclick="hop(${p})">🔀 Server hop</button></div><div id=sv></div></div>`;srv(p,'Asc');pvSaved(p);if(focus=='priv')setTimeout(()=>{const e=$('#privcard');e&&e.scrollIntoView({behavior:'smooth'})},400)}
 async function srv(p,sort,more){const el=$('#sv');if(!more){SV=[];SVC=null;el.innerHTML='Loading…'}const r=await api('servers',{place:p,sort,cursor:more?SVC:''});if(r.error){el.innerHTML=esc(r.error);return}SV=SV.concat(r.list);SVC=r.next;SVS=sort;renderSV(p)}
 function renderSV(p,by){const el=$('#sv');if(!el)return;const l=[...SV];if(by=='ping')l.sort((a,b)=>(a.ping??9999)-(b.ping??9999));
  el.innerHTML='<table>'+l.map(s=>`<tr><td>${s.playing}/${s.max}</td><td>${s.ping??'?'} ms</td><td>${s.fps} fps</td><td>${s.id.slice(0,8)}…</td><td style="text-align:right"><button class="btn sm" onclick="pl(${p},'${s.id}')">Join</button></td></tr>`).join('')+'</table>'+(SVC?`<button class="btn alt" onclick="srv(${p},SVS,1)">Load more servers</button>`:'')||'<small>No servers</small>'}
@@ -1962,18 +1984,8 @@ async function buy(i){const x=CAT[i];if(!x)return;
  if(r.error&&!r.purchased)return toast(r.error,5000);
  toast(r.purchased?(bun?'Purchased! Press Wear on it, or find it in Avatar > Wardrobe > Bundles':'Purchased! Find it in Avatar > Wardrobe'):(msg||'Not purchased'),5000);
  api('me').then(u=>{if(u.robux!=null){S.user=u;const e=$('header .pill:not(#act)');e&&(e.textContent='R$ '+u.robux.toLocaleString())}})}
-// ---- blocking (real Roblox account) + profile lookup
-const UB='https://apis.roblox.com/user-blocking-api/v1/';
-let BLK=null,PCUR=null,PNAME={};
-async function blockCall(id,on){return api('block',{id,on})}
-const blkWeb=()=>open_('https://www.roblox.com/my/account#!/privacy');
-async function blkFail(id,on,msg){toast('Roblox refused this from the hub ('+msg+') - opening roblox.com so you can finish it there',7000);open_(on?'https://www.roblox.com/users/'+id+'/profile':'https://www.roblox.com/my/account#!/privacy')}
-async function blkLoad(force){if(BLK&&!force)return BLK;const r=await api('blocked');return BLK=r}
-const blkRows=l=>l.length?l.map(x=>`<div class=row style="margin:6px 0"><span style="flex:1"><b>${esc(x.display||x.name)}</b>${x.name?` <small style="display:inline">@${esc(x.name)}</small>`:''}</span><button class="btn alt sm" onclick="prof(${x.id})">Profile</button><button class="btn alt sm" onclick="unblockU(${x.id})">Unblock</button></div>`).join(''):'<small>You have not blocked anyone</small>';
-async function blkDraw(){const el=$('#pblk');if(!el||!S.connected)return;el.innerHTML='<div class=card><b>🚫 Blocked users</b><small>People you blocked on your Roblox account. Unblock them here.</small><div id=pbl>Loading…</div></div>';const l=await blkLoad(true),e=$('#pbl');if(e)e.innerHTML=l.error?esc(l.error)+'<div class=row style="margin-top:8px"><button class="btn alt sm" onclick="blkDraw()">Retry</button><button class="btn alt sm" onclick="blkWeb()">Open privacy settings on roblox.com</button></div>':blkRows(l)}
-async function blkAfter(){await blkLoad(true);if(tab=='profile'){blkDraw();PCUR&&prof(PCUR)}else if(tab=='rset')rset2()}
-async function blockU(id){const nm=PNAME[id]||'this user';if(!await ask('Block '+nm+' on Roblox?\nThis blocks them on your real Roblox account, not just in Sober Hub. You can unblock them from their profile or from the Blocked users list on the Profile tab.',{ok:'Block',danger:1,title:'Block on Roblox'}))return;const r=await blockCall(id,true);if(r.error)return blkFail(id,true,r.error);toast('Blocked on Roblox');blkAfter()}
-async function unblockU(id){const r=await blockCall(id,false);if(r.error)return blkFail(id,false,r.error);toast('Unblocked on Roblox');blkAfter()}
+// ---- profile lookup
+let PCUR=null;
 const hsx=(u,b)=>rb(u,b).catch(()=>({error:'failed'}));
 // /friends stops at 200 people, so the paged /friends/find endpoint fills in the rest (the same approach the Friends tab uses)
 async function allFr(id){const B='https://friends.roblox.com/v1/users/'+id,seen=new Set(),out=[],add=x=>{const i=x.id||x.userId;if(i&&!seen.has(i)){seen.add(i);out.push({id:i,name:x.name||'',displayName:x.displayName||''})}};
@@ -1988,7 +2000,7 @@ async function prof(pid){const box=$('#pf');if(!box)return;box.innerHTML='Lookin
  if(!id){const nm=($('#pu').value||'').trim();if(!nm)return box.innerHTML='Type a username first';
   const r=await rb('https://users.roblox.com/v1/usernames/users',{usernames:[nm],excludeBannedUsers:false}),u0=r.data&&r.data[0];if(!u0)return box.innerHTML='User not found';id=u0.id}
  PCUR=id;const me=S.user&&S.user.id==id,U='https://users.roblox.com/v1/users/'+id,F='https://friends.roblox.com/v1/users/'+id;
- const [i,fc,fo,fi,pr,av,hs,gr,fl,cg,fg,wr,rbd,sl,bd,st,bl]=await Promise.all([
+ const [i,fc,fo,fi,pr,av,hs,gr,fl,cg,fg,wr,rbd,sl,bd,st]=await Promise.all([
   hsx(U),hsx(F+'/friends/count'),hsx(F+'/followers/count'),hsx(F+'/followings/count'),
   S.connected?hsx('https://presence.roblox.com/v1/presence/users',{userIds:[id]}):{},
   hsx('https://thumbnails.roblox.com/v1/users/avatar?userIds='+id+'&size=420x420&format=Png'),
@@ -2001,14 +2013,14 @@ async function prof(pid){const box=$('#pf');if(!box)return;box.innerHTML='Lookin
   hsx('https://accountinformation.roblox.com/v1/users/'+id+'/roblox-badges'),
   hsx('https://accountinformation.roblox.com/v1/users/'+id+'/promotion-channels'),
   hsx('https://badges.roblox.com/v1/users/'+id+'/badges?limit=12&sortOrder=Desc'),
-  S.connected&&!me?hsx('https://friends.roblox.com/v1/users/'+S.user.id+'/friends/statuses?userIds='+id):{},
-  S.connected&&!me?blkLoad():[]]);
+  S.connected&&!me?hsx('https://friends.roblox.com/v1/users/'+S.user.id+'/friends/statuses?userIds='+id):{}]);
  if(i.error||!i.name)return box.innerHTML=esc(i.error||'User not found');
- PNAME[id]=i.displayName||i.name;const pu=$('#pu');if(pu)pu.value=i.name;
+ const pu=$('#pu');if(pu)pu.value=i.name;
  const frl=await fillUsers(Array.isArray(fl)?fl:[]);
+ const mine=S.connected&&!me?(FR.length?FR:await loadFriends()):[],mset=new Set(mine.map(f=>f.id)),mut=frl.filter(f=>mset.has(f.id));
  const exp=(cg.data||[]).filter(x=>x.rootPlace&&x.rootPlace.id),fav=(fg.data||[]).filter(x=>x.rootPlace&&x.rootPlace.id),wa=(wr.assets||[]);
  const [fth,gth,ath]=await Promise.all([thumbMap('users/avatar-headshot',frl.map(f=>f.id),'userIds'),thumbMap('games/icons',[...new Set([...exp,...fav].map(x=>x.id))],'universeIds'),thumbMap('assets',wa.map(a=>a.id),'assetIds')]);
- const p=((pr.userPresences||[])[0])||{},stt=((st.data||[])[0]||{}).status||'',isF=!!(S.connected&&!me&&(stt=='Friends'||FR.some(f=>f.id==id))),isB=Array.isArray(bl)&&bl.some(x=>x.id==id);
+ const p=((pr.userPresences||[])[0])||{},stt=((st.data||[])[0]||{}).status||'',isF=!!(S.connected&&!me&&(stt=='Friends'||FR.some(f=>f.id==id)));
  const lsr=(await api('lastseen',{id:id}))||{};
   const where=p.userPresenceType==2?'🟢 In game'+(p.lastLocation?': <b>'+esc(p.lastLocation)+'</b>':''):p.userPresenceType==1?'🔵 Online':p.userPresenceType==3?'🟠 In Studio':S.connected?'⚫ Offline'+(p.lastOnline?' · last online '+esc(new Date(p.lastOnline).toLocaleString()):''):'';
  const pasts=(hs.data||[]).map(x=>esc(x.name)).join(' · '),sls=Object.entries(sl&&!sl.error?sl:{}).filter(([k,v])=>typeof v=='string'&&v).map(([k,v])=>`<span class=stat style="margin-right:14px"><b style="font-size:13px">${esc(v)}</b>${esc(k)}</span>`).join('');
@@ -2022,24 +2034,23 @@ async function prof(pid){const box=$('#pf');if(!box)return;box.innerHTML='Lookin
   else acts+=`<button class=btn onclick="guard(rb('https://friends.roblox.com/v1/users/${id}/request-friend',{}),'Request sent').then(()=>prof(${id}))">Add friend</button>`;
   if(isF&&p.userPresenceType==2&&p.rootPlaceId)acts+=`<button class="btn play" style="padding:9px 22px" onclick="pl(${p.rootPlaceId},'${esc(p.gameId||'')}')">Join in Sober</button>`;
   acts+=`<button class="btn alt" onclick="guard(rb('https://friends.roblox.com/v1/users/${id}/follow',{}),'Following')">Follow</button>`;
-  acts+=isB?`<button class="btn alt" onclick="unblockU(${id})">✅ Unblock</button>`:`<button class="btn alt" onclick="blockU(${id})">🚫 Block</button>`}
+ }
  acts+=`<button class="btn alt" onclick="open_('https://www.roblox.com/users/${id}/profile')">Open on roblox.com</button><button class="btn alt" onclick="copy('https://www.roblox.com/users/${id}/profile')">Copy link</button>`;
- box.innerHTML=`<div class=card><div class=row style="align-items:flex-start;gap:20px"><img src="${esc(av.data&&av.data[0]?av.data[0].imageUrl:'')}" style="width:220px"><div style="flex:1;min-width:260px"><h2 style="margin:0">${esc(i.displayName)}${i.hasVerifiedBadge?' ✔':''}</h2><small>@${esc(i.name)} · joined ${esc((i.created||'').slice(0,10))} · ID ${id}</small>${i.isBanned?'<small style="color:#e5484d">⛔ This account is banned</small>':''}${where?`<p style="margin:8px 0">${where}</p>`:''}${lsl}${isB?'<small style="color:#e5484d">🚫 You have blocked this user on Roblox</small>':''}${i.description?`<p style="white-space:pre-wrap">${esc(i.description)}</p>`:'<small>No about text</small>'}
- <span class=stat><b>${fc.count??'—'}</b>friends</span><span class=stat><b>${fo.count??'—'}</b>followers</span><span class=stat><b>${fi.count??'—'}</b>following</span>${pasts?`<small style="margin-top:8px">Past usernames: ${pasts}</small>`:''}${sls?`<div style="margin-top:8px">${sls}</div>`:''}${rbs?`<div style="margin-top:8px">${rbs}</div>`:''}
+ box.innerHTML=`<div class=card><div class=row style="align-items:flex-start;gap:20px"><img src="${esc(av.data&&av.data[0]?av.data[0].imageUrl:'')}" style="width:220px"><div style="flex:1;min-width:260px"><h2 style="margin:0">${esc(i.displayName)}${i.hasVerifiedBadge?' ✔':''}</h2><small>@${esc(i.name)} · joined ${esc((i.created||'').slice(0,10))} · ID ${id}</small>${i.isBanned?'<small style="color:#e5484d">⛔ This account is banned</small>':''}${where?`<p style="margin:8px 0">${where}</p>`:''}${lsl}${i.description?`<p style="white-space:pre-wrap">${esc(i.description)}</p>`:'<small>No about text</small>'}
+ <span class=stat><b>${fc.count??'—'}</b>friends</span><span class=stat><b>${fo.count??'—'}</b>followers</span><span class=stat><b>${fi.count??'—'}</b>following</span>${S.connected&&!me?`<span class=stat><b>${mut.length}</b>mutual</span>`:''}${pasts?`<small style="margin-top:8px">Past usernames: ${pasts}</small>`:''}${sls?`<div style="margin-top:8px">${sls}</div>`:''}${rbs?`<div style="margin-top:8px">${rbs}</div>`:''}
  <div class=row style="margin-top:12px">${acts}</div></div></div></div>`
  +psec('Currently wearing ('+wa.length+')',wa.length?`<div style="display:flex;flex-wrap:wrap;gap:10px">${wa.map(a=>`<div style="width:84px;text-align:center;cursor:pointer" title="${esc(a.name)}" onclick="open_('https://www.roblox.com/catalog/${a.id}')"><img loading=lazy src="${esc(ath[a.id]||'')}" style="width:72px;height:72px;border-radius:var(--radius);background:#ffffff0d"><small style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(a.name)}</small></div>`).join('')}</div>`:'')
  +psec('Experiences made by '+esc(i.displayName)+' ('+exp.length+')',exp.length?`<div class=rs>${exp.map(x=>tile({place:x.rootPlace.id,name:x.name,icon:gth[x.id]},(x.placeVisits||0).toLocaleString()+' visits')).join('')}</div>`:'')
  +psec('Favorite experiences',fav.length?`<div class=rs>${fav.map(x=>tile({place:x.rootPlace.id,name:x.name,icon:gth[x.id]},'')).join('')}</div>`:'')
  +psec('Groups ('+(gr.data||[]).length+')',(gr.data||[]).length?`<table>${gr.data.map(x=>`<tr><td><b>${esc((x.group||{}).name)}</b>${(x.group||{}).hasVerifiedBadge?' ✔':''}<small style="margin:0">${esc((x.role||{}).name||'')}</small></td><td style="text-align:right"><small style="margin:0">${((x.group||{}).memberCount||0).toLocaleString()} members</small></td><td style="text-align:right"><button class="btn alt sm" onclick="open_('https://www.roblox.com/groups/${(x.group||{}).id}')">Open</button></td></tr>`).join('')}</table>`:'')
+ +(mut.length?psec('Mutual friends ('+mut.length+')',`<div style="display:flex;flex-wrap:wrap;gap:12px">${mut.map(f=>`<div class=fr onclick="prof(${f.id})" title="@${esc(f.name)}"><div class=ava><img loading=lazy src="${esc(fth[f.id]||'')}"></div><b>${esc(f.display)}</b><small>@${esc(f.name)}</small></div>`).join('')}</div>`):'')
  +psec('Friends ('+frl.length+(fc.count>frl.length?' of '+fc.count:'')+')',frl.length?`<div style="display:flex;flex-wrap:wrap;gap:12px;max-height:320px;overflow:auto">${frl.map(f=>`<div class=fr onclick="prof(${f.id})" title="@${esc(f.name)}"><div class=ava><img loading=lazy src="${esc(fth[f.id]||'')}"></div><b>${esc(f.display)}</b><small>@${esc(f.name)}</small></div>`).join('')}</div>`:'')
  +((bd.data||[]).length?psec('Recent badges',`<small>${bd.data.map(x=>esc(x.name)).join(' · ')}</small>`):'')}
 // ---- roblox settings
 const PRIV=[['Who can chat with me (app)','app-chat-privacy','appChatPrivacy',['NoOne','Friends','Everyone']],['Who can chat with me (in experience)','game-chat-privacy','gameChatPrivacy',['NoOne','Friends','Everyone']],['Who can see my inventory','inventory-privacy','inventoryPrivacy',['NoOne','Friends','FriendsAndFollowing','AllUsers']]];
 async function privLoad(){let h='';for(const [n,u,k,o] of PRIV){const r=await rb('https://accountsettings.roblox.com/v1/'+u),v=r[k];
  h+=r.error?`<div>${n}: <small style="display:inline">unavailable</small></div>`:`<div class=row style="margin:6px 0"><span style="width:300px">${n}</span><select onchange="guard(rb('https://accountsettings.roblox.com/v1/${u}',{${k}:this.value}),'Saved')">${[...new Set([v,...o])].map(x=>`<option ${x==v?'selected':''}>${x}</option>`).join('')}</select></div>`}
- $('#priv').innerHTML=h;
- const b=await blkLoad(true);$('#blk').innerHTML=b.error?esc(b.error):blkRows(b)}
-const rset2=()=>go('rset');
+ $('#priv').innerHTML=h}
 const saveAbout=()=>guard(rb('https://users.roblox.com/v1/description',{description:$('#about').value}),'About saved');
 const saveDn=()=>guard(rb(`https://users.roblox.com/v1/users/${S.user.id}/display-names`,{newDisplayName:$('#dn').value},'PATCH'),'Display name changed');
 // ---- messages
@@ -2057,13 +2068,13 @@ Object.assign(PAGES,{
   <div class=card><div class=row id=avtabs></div><div class=row id=avsub style="margin-top:8px"></div><div class=row style="margin-top:8px"><input id=wq placeholder="Search this category..." oninput="wfilter()" style="flex:1"></div><div id=ward class=grid style="margin-top:12px">...</div><button id=wmore class="btn alt" style="display:none;margin-top:10px" onclick="wardrobe(false)">Load more</button></div></div></div>`},
  inbox(){return needConn()||`<h2>Messages</h2><div class=row><select onchange="MT=this.value;loadMsgs(true)">${['Inbox','Sent','Archive'].map(t=>`<option ${t==MT?'selected':''}>${t}</option>`).join('')}</select></div><div id=msg class=card style="margin-top:12px">Loading…</div><button id=mm class="btn alt" style="display:none" onclick="loadMsgs()">Load more</button>`},
  groups(){return needConn()||'<h2>Communities</h2><div id=gr class=card>Loading…</div>'},
- profile(){return `<h2>Profile</h2><div class=row><input id=pu placeholder=Username value="${esc(PU||(S.user?S.user.name:''))}" onkeydown="if(event.key=='Enter')prof()"><button class=btn onclick="prof()">Look up</button></div><div id=pf style="margin-top:14px"></div><div id=pblk style="margin-top:14px"></div>`},
- rset(){return needConn()||`<h2>Roblox Settings</h2><div class=card><b>Real Roblox settings</b><small>Opens the official roblox.com page in your browser</small><div class=row style="margin-top:8px">${[['Account Info','info'],['Security','security'],['Privacy','privacy'],['Parental Controls','parental-controls'],['Notifications','notifications'],['Billing','billing']].map(([n,h])=>`<button class=btn onclick="open_('https://www.roblox.com/my/account#!/${h}')">${n}</button>`).join('')}</div></div><h3>Quick edits inside Sober Hub</h3><div class=card><b>Profile</b><textarea id=about rows=3 placeholder="About me"></textarea><div class=row><button class=btn onclick="saveAbout()">Save about</button><input id=dn placeholder="New display name"><button class="btn alt" onclick="saveDn()">Change display name</button></div></div><div class=card><b>Privacy</b><div id=priv>Loading…</div></div><div class=card><b>Blocked users</b><div id=blk>Loading…</div></div>`}});
+ profile(){return `<h2>Profile</h2><div class=row><input id=pu placeholder=Username value="${esc(PU||(S.user?S.user.name:''))}" onkeydown="if(event.key=='Enter')prof()"><button class=btn onclick="prof()">Look up</button></div><div id=pf style="margin-top:14px"></div>`},
+ rset(){return needConn()||`<h2>Roblox Settings</h2><div class=card><b>Real Roblox settings</b><small>Opens the official roblox.com page in your browser</small><div class=row style="margin-top:8px">${[['Account Info','info'],['Security','security'],['Privacy','privacy'],['Parental Controls','parental-controls'],['Notifications','notifications'],['Billing','billing']].map(([n,h])=>`<button class=btn onclick="open_('https://www.roblox.com/my/account#!/${h}')">${n}</button>`).join('')}</div></div><h3>Quick edits inside Sober Hub</h3><div class=card><b>Profile</b><textarea id=about rows=3 placeholder="About me"></textarea><div class=row><button class=btn onclick="saveAbout()">Save about</button><input id=dn placeholder="New display name"><button class="btn alt" onclick="saveDn()">Change display name</button></div></div><div class=card><b>Privacy</b><div id=priv>Loading…</div></div>`}});
 Object.assign(AFTER,{
  avatar(){if(S.connected)avLoad()},
  inbox(){if(S.connected)loadMsgs(true)},
  async groups(){if(!S.connected)return;const r=await rb(`https://groups.roblox.com/v1/users/${S.user.id}/groups/roles`);$('#gr').innerHTML=r.error?esc(r.error):'<table>'+(r.data||[]).map(x=>`<tr><td><b>${esc(x.group.name)}</b></td><td>${esc(x.role.name)}</td><td>${x.group.memberCount.toLocaleString()} members</td><td><button class="btn alt" onclick="open_('https://www.roblox.com/communities/${x.group.id}')">Open</button></td></tr>`).join('')+'</table>'},
- profile(){if(S.user||PU){prof();PU=''}blkDraw()},
+ profile(){if(S.user||PU){prof();PU=''}},
  async rset(){if(!S.connected)return;rb(`https://users.roblox.com/v1/users/${S.user.id}`).then(r=>{$('#about')&&($('#about').value=r.description||'')});privLoad()}});
 // ---- right-click menu, hidden games / chats, private servers
 const hidSet=()=>new Set((S.hidden_games||[]).map(x=>String(x.place)));
@@ -2080,6 +2091,7 @@ document.addEventListener('keydown',e=>{if(e.key=='Escape')closeCtx()});
 function gameMenu(e,p){const g=GM[p]||{place:p,name:nameOf(p)},isF=S.favs.some(f=>f.place==p),hd=hidSet().has(String(p));
  ctxMenu(e,[['▶ Play in Sober',()=>play(p,g.name||'',g.icon||'')],['ℹ Details',()=>openGame(p)],['🔒 Private servers…',()=>openGame(p,'priv')],'-',
   [isF?'★ Remove from favorites':'☆ Add to favorites',async()=>{await fav(g,!isF);toast(isF?'Removed from favorites':'Added to favorites')}],
+  [(S.later||[]).some(x=>x.place==p)?'🕒 Remove from Play later':'🕒 Play later',()=>laterToggle(g)],['🔀 Server hop',()=>hop(p)],
   hd?['👁 Show in recommendations again',()=>unhideGame(p)]:['🙈 Hide from recommendations',()=>hideGame(g)],'-',
   ['🔗 Copy link',()=>copy('https://www.roblox.com/games/'+p)]])}
 function drawDisc(){const el=$('#disc');if(!el||!Array.isArray(DISC))return;const h=hidSet();
@@ -2099,7 +2111,8 @@ function msgMenu(e,uid){const c=CV.find(x=>x.id==CID)||{};
  ctxMenu(e,[['🙈 Hide chats from '+uname(uid),()=>hideChat(uid)],['🙂 View profile',()=>{PU=((c.user_data||{})[uid]||{}).name||'';go('profile')}]])}
 function friendMenu(e,id){const f=FR.find(x=>x.id==id);if(!f)return;const hd=hcSet().has(String(id));
  ctxMenu(e,[...(f.status==2&&f.place?[['▶ Join in Sober',()=>joinFriend(id)],['ℹ View game',()=>openGame(f.place)]]:[]),['💬 Message',()=>chatWith(id)],['🙂 Profile',()=>{PU=f.name;go('profile')}],
-  [(S.pinned||[]).includes(id)?'★ Unpin':'☆ Pin',()=>pin(id)],'-',hd?['👁 Unhide chats',()=>unhideChat(id)]:['🙈 Hide chats from '+f.display,()=>hideChat(id,f.display)]])}
+  [(S.pinned||[]).includes(id)?'★ Unpin':'☆ Pin',()=>pin(id)],
+  ['✏ '+(f.nick?'Change nickname…':'Set nickname…'),()=>setNick(id)],...(f.nick?[['🧹 Remove nickname',()=>setNick(id,1)]]:[]),'-',hd?['👁 Unhide chats',()=>unhideChat(id)]:['🙈 Hide chats from '+f.display,()=>hideChat(id,f.display)]])}
 // -- hub settings card
 const hiddenCard=()=>{const g=S.hidden_games||[],c=Object.entries(S.hidden_chat||{}),row=(t,f)=>`<div class=row style="margin:4px 0"><span style="flex:1">${t}</span>${f}</div>`;
  return `<div class=card><b>Hidden items</b><small>Hiding only affects this hub. Nothing changes on your Roblox account.</small>
@@ -2233,8 +2246,8 @@ async function toggleReq(){await save({opts:{hidereq:!(S.opts&&S.opts.hidereq)}}
 // ---- friend popup, quick-jump palette, shortcuts
 function showFriend(id){const f=FR.find(x=>x.id==id);if(!f)return;$('#modal')&&$('#modal').remove();const m=document.createElement('div');m.id='modal';m.style='position:fixed;inset:0;background:#000a;z-index:20;display:flex;align-items:center;justify-content:center';m.onclick=e=>{if(e.target==m)m.remove()};
  const pn=(S.pinned||[]).includes(f.id);
- m.innerHTML=`<div class=card style="min-width:320px;text-align:center;margin:0"><img class=av src="${esc(f.avatar||'')}"><h3 style="margin:8px 0 0">${esc(f.display)}</h3><small>@${esc(f.name)}</small><p>${f.status==2?'🟢 Playing <b>'+esc(f.where||'a game')+'</b>':f.status==1?'🔵 Online':f.status==3?'🟠 In Studio':'⚫ Offline<br><small>'+esc(seenTxt(f))+'</small>'}</p>
- ${f.status==2&&f.place?`<button class="btn play" onclick="joinFriend(${f.id});$('#modal').remove()">Join in Sober</button><button class="btn alt" onclick="$('#modal').remove();openGame(${f.place})">View game</button>`:''}<button class="btn alt" onclick="$('#modal').remove();chatWith(${f.id})">💬 Message</button><button class="btn alt" onclick="$('#modal').remove();PU='${esc(f.name)}';go('profile')">Profile</button><button class="btn alt" onclick="pin(${f.id}).then(()=>{$('#modal')&&$('#modal').remove();const e=$('#fr');e&&(e.innerHTML=frs(FR))})">${pn?'★ Unpin':'☆ Pin'}</button><button class="btn alt" onclick="$('#modal').remove()">Close</button></div>`;document.body.appendChild(m)}
+ m.innerHTML=`<div class=card style="min-width:320px;text-align:center;margin:0"><img class=av src="${esc(f.avatar||'')}"><h3 style="margin:8px 0 0">${esc(f.display)}</h3><small>@${esc(f.name)}${f.nick?' · '+esc(f.real||''):''}</small><p>${f.status==2?'🟢 Playing <b>'+esc(f.where||'a game')+'</b>':f.status==1?'🔵 Online':f.status==3?'🟠 In Studio':'⚫ Offline<br><small>'+esc(seenTxt(f))+'</small>'}</p>
+ ${f.status==2&&f.place?`<button class="btn play" onclick="joinFriend(${f.id});$('#modal').remove()">Join in Sober</button><button class="btn alt" onclick="$('#modal').remove();openGame(${f.place})">View game</button>`:''}<button class="btn alt" onclick="$('#modal').remove();chatWith(${f.id})">💬 Message</button><button class="btn alt" onclick="$('#modal').remove();PU='${esc(f.name)}';go('profile')">Profile</button><button class="btn alt" onclick="pin(${f.id}).then(()=>{$('#modal')&&$('#modal').remove();const e=$('#fr');e&&(e.innerHTML=frs(FR))})">${pn?'★ Unpin':'☆ Pin'}</button><button class="btn alt" onclick="$('#modal').remove();setNick(${f.id})">✏ Nickname</button><button class="btn alt" onclick="$('#modal').remove()">Close</button></div>`;document.body.appendChild(m)}
 let CML=[];
 function cmRun(i){const x=CML[i];$('#modal')&&$('#modal').remove();x&&x.f()}
 function cmdk(){if($('#modal'))return $('#modal').remove();const m=document.createElement('div');m.id='modal';m.style='position:fixed;inset:0;background:#000a;z-index:20;display:flex;align-items:flex-start;justify-content:center;padding-top:14vh';m.onclick=e=>{if(e.target==m)m.remove()};
@@ -2247,6 +2260,38 @@ function cmdk(){if($('#modal'))return $('#modal').remove();const m=document.crea
   CML=out.slice(0,12);$('#cl2').innerHTML=CML.map((x,i)=>`<a class=cmd onclick="cmRun(${i})">${esc(x.t)}</a>`).join('')};
  inp.oninput=draw;inp.onkeydown=e=>{if(e.key=='Enter')cmRun(0)};draw();inp.focus()}
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()=='k'){e.preventDefault();cmdk()}else if(e.key=='Escape'){$('#modal')&&$('#modal').remove()}else if(e.key=='/'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){e.preventDefault();$('#ts')&&$('#ts').focus()}});
+let BRKN={},LIMD='',DOCR=[];
+const loadFriends=async()=>{const l=await api('friends');return Array.isArray(l)?setFriends(l):FR};
+
+// ---- friend nicknames (shown only inside Sober Hub)
+async function setNick(id,clear){const f=FR.find(x=>x.id==id);if(!f)return;const N={...(S.nicks||{})};
+ if(clear)delete N[id];else{const n=(await askText('Nickname for '+(f.real||f.display)+'. It is only shown inside Sober Hub.',f.nick?f.display:'',{title:'Set nickname',ok:'Save'})||'').trim().slice(0,30);if(!n)return;N[id]=n}
+ await save({nicks:N},1);toast(clear?'Nickname removed':'Nickname saved');await loadFriends();load()}
+
+// ---- play later
+async function laterToggle(g){if(!g||!g.place)return;const old=S.later||[],l=old.filter(x=>x.place!=g.place),had=l.length!=old.length;if(!had)l.push({place:+g.place,name:g.name||nameOf(g.place),icon:g.icon||''});
+ await save({later:l},1);toast(had?'Removed from Play later':'Added to Play later');if(tab=='library'||tab=='home')go(tab)}
+const laterDel=p=>laterToggle({place:p});
+
+// ---- server hop: a different public server than your recent ones, with room, not empty, lowest ping first
+async function hop(p){toast('Looking for a fresh server…',4000);const [a,b]=await Promise.all([api('servers',{place:p,sort:'Desc'}),api('servers',{place:p,sort:'Asc'})]);
+ const all=new Map();[...(a.list||[]),...(b.list||[])].forEach(s=>all.set(s.id,s));if(!all.size)return toast(a.error||b.error||'No public servers found');
+ const seen=new Set(S.history.filter(x=>x.place==p&&x.job).slice(0,6).map(x=>x.job)),pool=[...all.values()].filter(s=>!seen.has(s.id));
+ let c=pool.filter(s=>s.playing<s.max-1&&s.playing>=2);if(!c.length)c=pool.filter(s=>s.playing<s.max);if(!c.length)return toast('No other server with room right now');
+ c.sort((x,y)=>(x.ping??9999)-(y.ping??9999));const s=c[Math.random()*Math.min(3,c.length)|0];
+ toast('Hopping to a server with '+s.playing+' player'+(s.playing==1?'':'s')+(s.ping!=null?' · '+s.ping+' ms':''),5000);pl(p,s.id)}
+
+// ---- healthy play: break reminders and a daily limit (checked every 5 s from pollActive)
+function remind(title,body){if((S.opts||{}).nsound!='0')chime(true);toast(title+' - '+body,9000);api('dnotify',{title,body,icon:''})}
+function breakCheck(){const o=S.opts||{};if(!ACT.length){BRKN={};return}
+ if(o.brk=='1'){const bm=Math.max(5,+o.brkmin||60)*60;for(const a of ACT){const n=BRKN[a.place]||bm;if(a.secs>=n){BRKN[a.place]=a.secs+bm;remind('Time for a break','You have been playing '+a.name+' for '+fmt(a.secs)+'. Stretch, drink some water and rest your eyes.')}}}
+ const lim=(+o.lim||0)*60;if(lim>0&&LIMD!=lk(new Date())){const t=todaySecs()+ACT.reduce((s,a)=>s+a.secs,0);if(t>=lim){LIMD=lk(new Date());remind('Daily play limit reached','You have played '+fmt(t)+' today. Your limit is '+fmt(lim)+'.')}}}
+
+// ---- health check
+async function doctor(b){b.disabled=true;const el=$('#docr');el.innerHTML='Checking…';const r=await api('doctor',{});b.disabled=false;if(!$('#docr'))return;if(r.error){el.textContent=r.error;return}DOCR=r;
+ el.innerHTML=`<table>${r.map(x=>`<tr><td style="width:32px">${{ok:'✅',warn:'⚠️',bad:'❌'}[x.state]||'•'}</td><td><b>${esc(x.name)}</b><small style="margin:0">${esc(x.detail)}</small></td></tr>`).join('')}</table><button class="btn alt sm" style="margin-top:8px" onclick="docCopy()">Copy report</button>`}
+const docCopy=()=>copy(DOCR.map(x=>({ok:'OK',warn:'WARN',bad:'FAIL'}[x.state]||'?')+' - '+x.name+': '+x.detail).join('\n'));
+
 load().then(()=>{updPoll();setInterval(updPoll,60000);chatWatch();setInterval(chatWatch,45000);pollActive();setInterval(pollActive,5000);watch();setInterval(watch,30000)});
 </script></body></html>"""
 
