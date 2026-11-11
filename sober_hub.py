@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone
 
-VERSION = "5.6.0"   # bump this and push the file to GitHub to roll out an update
+VERSION = "5.7.0"   # bump this and push the file to GitHub to roll out an update
 WHATS_NEW = [   # shown in the "Sober Hub updated automatically!" popup after an update; edit this list for each release (keep each line under 200 characters)
     "New Server hop: jump to a different public server (skips your recent ones and full or empty ones, prefers low ping) from the game page, the game right-click menu and Home",
     "New Play later list: add games from the right-click menu or the game page. They show on Home and in Library and leave the list when you play them",
@@ -690,6 +690,22 @@ def ls_clear(_a):
     with LSL: LS.clear(); LS_EV.clear(); LS_META.clear(); _lssave(True)
     return {"ok": True}
 
+PRES = {}; PRES_KEEP = 180   # friend id -> (time, last presence Roblox really gave us); used for up to 3 minutes when a poll fails
+def pres_chunk(c):
+    """Presence for one batch of friend ids. Roblox sometimes errors, rate-limits or answers 'everyone offline' for a whole batch, which made every
+    friend look offline. Retry with a short wait; an empty answer, or one that turns people we saw online within the last 90 s all offline,
+    counts as a bad answer. Returns None if no good answer arrived (the caller then keeps the remembered presence)."""
+    now = time.time()
+    was_on = [i for i in c if PRES.get(i) and now - PRES[i][0] <= 90 and (PRES[i][1].get("userPresenceType") or 0) > 0]
+    for n in range(3):
+        try:
+            ps = req("https://presence.roblox.com/v1/presence/users", {"userIds": c}).get("userPresences") or []
+            got = {p.get("userId"): p for p in ps}
+            if got and not (len(was_on) >= 2 and not any((got.get(i) or {}).get("userPresenceType") for i in was_on)): return ps
+        except Exception: pass
+        if n < 2: time.sleep(0.5 * (n + 1))
+    return None
+
 def friends(a):
     """EVERY friend (no cap). Presence is requested 50 at a time and avatars 100 at a time, in parallel."""
     u = load()["user"]
@@ -697,22 +713,26 @@ def friends(a):
     fl = all_friends(u["id"])
     ids = [f["id"] for f in fl]
     def pres(c):
-        try: return req("https://presence.roblox.com/v1/presence/users", {"userIds": c})["userPresences"]
-        except Exception: return []
+        return pres_chunk(c)
     def ava(c):
         try: return thumbs("users/avatar-headshot", c)
         except Exception: return {}
     with ThreadPoolExecutor(4) as ex:
-        pr = {p["userId"]: p for ps in ex.map(pres, chunks(ids, 50)) for p in ps}
+        pr = {p["userId"]: p for ps in ex.map(pres, chunks(ids, 50)) for p in (ps or [])}
         av = {k: v for m in ex.map(ava, chunks(ids, 100)) for k, v in m.items()}
     pin = set(load().get("pinned") or [])
     prio = [f for f in fl if pr.get(f["id"], {}).get("userPresenceType", 0) in (1, 2, 3) or f["id"] in pin]
     nm = names(prio, 300)   # online, in-game and pinned friends first: full retries + single lookups, so they never show as "User 123"
     nm.update(names([f for f in fl if f["id"] not in nm]))
-    lastseen_update(fl, pr, nm)
+    lastseen_update(fl, pr, nm)   # only presence that really arrived (never the remembered fallback below)
+    now = time.time()
+    for i, p in pr.items(): PRES[i] = (now, p)
+    show = dict(pr)
+    for i in ids:   # a batch Roblox failed to answer (or answered as "everyone offline" right after people were online): show what we saw a moment ago, not "offline"
+        if i not in show and PRES.get(i) and now - PRES[i][0] <= PRES_KEEP: show[i] = PRES[i][1]
     out = []
     for f in fl:
-        p = pr.get(f["id"], {}); r = LS.get(f["id"]) or {}
+        p = show.get(f["id"], {}); r = LS.get(f["id"]) or {}
         out.append({"id": f["id"], "name": nm[f["id"]][0], "display": nm[f["id"]][1], "avatar": av.get(f["id"]),
                     "status": p.get("userPresenceType", 0), "place": p.get("rootPlaceId"), "job": p.get("gameId"), "where": p.get("lastLocation"),
                     "seen": r.get("t") or 0, "sing": bool(r.get("ing")), "sgame": r.get("g") or "", "splace": r.get("p"), "gt": r.get("gt") or 0})
@@ -868,9 +888,17 @@ def capture_server(place, ts, p):
                     if abs(h.get("ts", 0) - ts) < 1e-6: h["job"] = job; break
                 store(d)
 
+def sober_running():
+    """True while the Sober flatpak has a running process."""
+    try: return bool(shutil.which("flatpak")) and APP in _run(["flatpak", "ps", "--columns=application"]).stdout
+    except Exception: return False
+
 def launch(a):
     """Start Sober, optionally straight into a place / server / private-server link code, and record it in history and playtime stats."""
     place, job, code = a.get("place"), a.get("job"), a.get("code")
+    if place:   # Sober can only run one game at a time
+        if ACTIVE: raise Exception("A game is already running (" + sorted(ACTIVE.values(), key=lambda v: v["t0"])[0]["name"] + "). Leave it or close Sober first.")
+        if sober_running(): raise Exception("Sober is already running. Leave the game or close Sober (Sober Settings > Stop Sober) before launching another one.")
     cmd = shlex.split(load()["opts"]["cmd"])
     if place:
         u = f"roblox://experiences/start?placeId={int(place)}"
@@ -957,8 +985,7 @@ def sober(_):
     if inst:
         for line in _run(["flatpak", "info", APP]).stdout.splitlines():
             if line.strip().startswith("Version:"): ver = line.split(":", 1)[1].strip()
-        try: running = APP in _run(["flatpak", "ps", "--columns=application"]).stdout
-        except Exception: pass
+        running = sober_running()
     return {"installed": inst, "version": ver, "running": running, "cfg": cfg_read()[0], "path": SC}
 
 def doctor(_a):
@@ -1512,7 +1539,7 @@ const tile=(g,sub)=>(GM[g.place]=g,`<div class=tile onclick="openGame(${g.place}
 const dtile=g=>tile(g,`${g.like!=null?'👍 '+g.like+'% · ':''}👤 ${(g.playing||0).toLocaleString()}`);
 function setFriends(l){const pn=new Set(S.pinned||[]);l.sort((a,b)=>(pn.has(b.id)-pn.has(a.id))||((ORD[a.status]??3)-(ORD[b.status]??3)));FR=l;setTitle(l);return l}
 const frs=l=>l.map(f=>`<div class=fr onclick="showFriend(${f.id})" oncontextmenu="friendMenu(event,${f.id})"><div class=ava><img src="${esc(f.avatar||'')}"><span class="dot s${f.status}"></span></div><b>${(S.pinned||[]).includes(f.id)?'⭐ ':''}${esc(f.display)}</b><small>${f.status==2?esc(f.where||'In game'):f.status==1?'Online':f.status==0&&f.seen?esc(agoS(f.seen)):''}</small></div>`).join('')||'<small>No friends found</small>';
-async function play(place,name,icon,job,code){const r=await api('launch',{place,name,icon,job,code});if(!r.error&&(S.later||[]).some(x=>x.place==place))save({later:S.later.filter(x=>x.place!=place)},1);toast(r.error?r.error:'Launching in Sober…');setTimeout(load,900);setTimeout(pollActive,2500)}
+async function play(place,name,icon,job,code){const r=await api('launch',{place,name,icon,job,code});if(!r.error&&(S.later||[]).some(x=>x.place==place))save({later:S.later.filter(x=>x.place!=place)},1);toast(r.error?r.error:'Launching in Sober…',r.error?7000:0);setTimeout(load,900);setTimeout(pollActive,2500)}
 function pl(place,job,code){const g=cur&&cur.place==place?cur:(S.favs.find(f=>f.place==place)||S.history.find(f=>f.place==place)||{});play(place,g.name||'',g.icon||'',job||null,code||null)}
 function joinFriend(id){const f=FR.find(x=>x.id==id);if(!f)return;if(f.status==2&&f.place){play(f.place,f.where||'',null,f.job)}else toast(f.status==2?'Game not joinable':'Friend is not in a game')}
 function heroHTML(g,label){LP=g;const l=lastSrv(g.place),p2=S.play[g.place];
